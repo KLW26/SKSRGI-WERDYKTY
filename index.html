@@ -15430,21 +15430,6 @@ const ANN_ICONS = { info: "ℹ️", warn: "⚠️", crit: "⛔" };
 const menuEl = document.querySelector(".card .menu");
 if (menuEl) menuEl.insertAdjacentHTML("beforebegin",
     `<div id="announcementBanner" class="ann-banner" role="status"><span class="ann-icon"></span><div class="ann-body"></div><button type="button" class="ann-close" title="Ukryj to ogłoszenie">✕</button></div>`);
-const unlockBox = $("reportScheduleBox");
-if (unlockBox) unlockBox.insertAdjacentHTML("afterend", `
-  <div id="announcementAdminBox" class="stats-group-box" style="display:none; border-color: var(--gold-dim); margin-bottom: 14px;">
-    <div class="stats-group-title" style="color:var(--amber-text);">📢 Ogłoszenie dla wszystkich (baner na górze strony)</div>
-    <textarea id="annText" maxlength="600" placeholder="np. Okno zgłoszeń po GP Monzy zostaje wydłużone do środy 21:15." style="min-height:64px;"></textarea>
-    <div style="display:flex; flex-wrap:wrap; gap:12px; align-items:flex-end; margin-top:10px;">
-      <div style="min-width:170px;"><label for="annLevel">Rodzaj</label>
-        <select id="annLevel"><option value="info">ℹ️ Informacja</option><option value="warn">⚠️ Ważne</option><option value="crit">⛔ Pilne (nie da się ukryć)</option></select></div>
-      <div style="min-width:200px;"><label for="annExpires">Wygasa (opcjonalnie)</label><input type="datetime-local" id="annExpires"></div>
-      <button type="button" class="btn-success" style="padding:8px 16px; font-size:11px;" onclick="publishAnnouncement()">📢 OPUBLIKUJ</button>
-      <button type="button" class="btn-secondary" style="padding:8px 16px; font-size:11px;" onclick="clearAnnouncement()">✕ USUŃ OGŁOSZENIE</button>
-    </div>
-    <div id="annStatus" style="margin-top:8px; font-size:11px; color:var(--text-dim);"></div>
-  </div>`);
-
 function linkify(escaped) {
     return escaped.replace(/(https?:\/\/[^\s<]+)/g, '<a href="$1" target="_blank" rel="noopener">$1</a>');
 }
@@ -15467,44 +15452,11 @@ function renderAnnouncementBanner() {
     closeBtn.style.display = lvl === "crit" ? "none" : "";
     closeBtn.onclick = () => { try { localStorage.setItem(ANN_DISMISS_KEY, String(a.id)); } catch (e) {} el.classList.remove("show"); };
 }
-function renderAnnouncementAdmin() {
-    const st = $("annStatus");
-    if (!st) return;
-    const a = currentAnnouncement;
-    if (annActive(a)) st.textContent = `🟢 Aktywne ogłoszenie (${escapeHtml(a.author || "?")}, ${formatTimestamp(a.ts)})${a.expiresAt ? " — wygasa " + formatTimestamp(a.expiresAt) : ""}.`;
-    else if (a && a.text) st.textContent = "⚪ Ostatnie ogłoszenie wygasło.";
-    else st.textContent = "Brak aktywnego ogłoszenia.";
-}
-window.publishAnnouncement = async function () {
-    if (!canManageSys()) return alert("Brak uprawnień (wymagany Główny Steward lub uprawnienie SYS).");
-    const text = ($("annText").value || "").trim();
-    if (!text) return alert("Wpisz treść ogłoszenia.");
-    const exp = $("annExpires").value ? new Date($("annExpires").value).getTime() : null;
-    if (exp && exp <= Date.now()) return alert("Data wygaśnięcia musi być w przyszłości.");
-    const prev = currentAnnouncement ? JSON.parse(JSON.stringify(currentAnnouncement)) : null;
-    const ann = { id: Date.now(), text, level: $("annLevel").value, expiresAt: exp, author: loggedInSteward.nick, ts: Date.now() };
-    await database.ref("settings/announcement").set(ann);
-    await logAction(loggedInSteward.nick, "SYSTEM", "OGŁOSZENIE", `Opublikowano ogłoszenie (${ann.level}): "${text.slice(0, 200)}"`, { items: [{ path: "settings/announcement", data: prev }] });
-    showToast("📢 Ogłoszenie opublikowane", "Baner jest widoczny dla wszystkich odwiedzających.");
-};
-window.clearAnnouncement = async function () {
-    if (!canManageSys()) return alert("Brak uprawnień.");
-    if (!currentAnnouncement) return;
-    if (!confirm("Usunąć aktualne ogłoszenie?")) return;
-    const prev = JSON.parse(JSON.stringify(currentAnnouncement));
-    await database.ref("settings/announcement").remove();
-    await logAction(loggedInSteward.nick, "SYSTEM", "OGŁOSZENIE", "Usunięto ogłoszenie.", { items: [{ path: "settings/announcement", data: prev }] });
-};
 database.ref("settings/announcement").on("value", s => {
     currentAnnouncement = s.val();
     renderAnnouncementBanner();
-    renderAnnouncementAdmin();
-    if (currentAnnouncement && $("annText") && document.activeElement !== $("annText") && !$("annText").value) {
-        $("annText").value = currentAnnouncement.text || "";
-        $("annLevel").value = currentAnnouncement.level || "info";
-    }
 });
-setInterval(() => { renderAnnouncementBanner(); renderAnnouncementAdmin(); }, 60000);
+setInterval(renderAnnouncementBanner, 60000);
 
 /* ============================================================
    3. LICZNIK OKNA ZGŁOSZEŃ
@@ -15964,8 +15916,6 @@ wrap("applyStewardPermissions", function () {
     const show = (id, cond, disp) => { const el = $(id); if (el) el.style.display = cond ? (disp || "") : "none"; };
     show("btnNextCase", canReview());
     show("btnBulletin", isAdminAuthenticated);
-    show("announcementAdminBox", canManageSys(), "block");
-    renderAnnouncementAdmin();
     refreshLogButtons();
     decorateStewardUnread();
 });
@@ -16820,21 +16770,6 @@ window.fiaAutoSelectRoundTrack = () => autoSelectRoundTrack();
 
 const formTitle = document.querySelector("#formSection .section-title");
 if (formTitle) formTitle.insertAdjacentHTML("afterend", `<div id="roundInfoBar" class="round-bar"></div>`);
-const settingsAnchorBox = $("announcementAdminBox") || $("reportScheduleBox");
-if (settingsAnchorBox) settingsAnchorBox.insertAdjacentHTML("afterend", `
-  <div id="calendarAdminBox" class="stats-group-box" style="display:none; border-color: var(--gold-dim); margin-bottom:14px;">
-    <div class="stats-group-title" style="color:var(--gold);">📅 Kalendarz sezonu</div>
-    <div style="display:flex; flex-wrap:wrap; gap:10px; align-items:flex-end; margin-bottom:10px;">
-      <div style="min-width:240px; flex:1;"><label for="calTrack">Tor</label><select id="calTrack"></select></div>
-      <div style="min-width:160px;"><label for="calDate">Data wyścigu</label><input type="date" id="calDate"></div>
-      <div style="min-width:140px;"><label for="calLabel">Nazwa (opcjonalnie)</label><input type="text" id="calLabel" maxlength="40" placeholder="np. Runda 7"></div>
-      <button type="button" class="btn-success" style="padding:8px 16px; font-size:11px;" onclick="addCalendarRound()">＋ DODAJ RUNDĘ</button>
-    </div>
-    <div id="calList"></div>
-  </div>`);
-const calTrack = $("calTrack");
-if (calTrack) calTrack.innerHTML = tracks.map(t => `<option value="${escapeHtml(t)}">${escapeHtml(t)}</option>`).join("");
-
 function renderRoundBar() {
     const bar = $("roundInfoBar");
     if (!bar) return;
@@ -16845,20 +16780,6 @@ function renderRoundBar() {
     if (next) parts.push(`⏭ ${L("Następna", "Next")}: <b>${escapeHtml(next.track)}</b> — ${dayStr(roundTs(next))} (${L("za", "in")} ${F.fmtLeft(roundTs(next) - Date.now())})`);
     parts.push(`<span style="color:var(--text-muted);">${L("Runda", "Round")} ${pastRounds().length}/${calendarRounds.length}</span>`);
     bar.innerHTML = parts.join("");
-}
-function renderCalendarAdmin() {
-    const box = $("calList");
-    if (!box) return;
-    if (!calendarRounds.length) { box.innerHTML = `<div style="font-size:12px; color:var(--text-dim);">Brak rund. Dodaj pierwszą rundę sezonu powyżej.</div>`; return; }
-    const next = nextRound();
-    box.innerHTML = calendarRounds.map((r, i) => {
-        const cls = r === next ? "next" : (roundTs(r) <= todayStart() ? "past" : "");
-        const cases = (globalIncidents || []).filter(x => x.track === r.track && incTs(x) >= roundTs(r) - 86400000 && incTs(x) < roundTs(r) + 8 * 86400000).length;
-        return `<div class="cal-row ${escapeHtml(cls)}"><span class="cal-date">${dayStr(roundTs(r))}</span><span style="color:var(--text-muted); min-width:26px;">#${escapeHtml(i + 1)}</span>
-          <span class="cal-track">${escapeHtml(r.track)}${r.label ? ` <em style="color:var(--text-dim);">· ${escapeHtml(r.label)}</em>` : ""}${r === next ? " ⏭" : ""}</span>
-          <span style="font-size:11px; color:var(--text-dim);">${escapeHtml(cases ? `${cases} ${plural(cases, "zgłoszenie", "zgłoszenia", "zgłoszeń")}` : "")}</span>
-          <button type="button" class="btn-secondary" onclick="removeCalendarRound('${jsAttr(r.key)}')" title="Usuń rundę">✕</button></div>`;
-    }).join("");
 }
 // Automatyczny wybór toru ostatniej rundy w pustym formularzu (do 7 dni po wyścigu).
 function autoSelectRoundTrack() {
@@ -16873,31 +16794,10 @@ database.ref("settings/calendar/rounds").on("value", s => {
     const v = s.val() || {};
     calendarRounds = Object.entries(v).map(([key, r]) => ({ key, ...r })).filter(r => r.track && /^\d{4}-\d{2}-\d{2}$/.test(r.date || "")).sort((a, b) => roundTs(a) - roundTs(b));
     renderRoundBar();
-    renderCalendarAdmin();
     autoSelectRoundTrack();
 });
 setInterval(renderRoundBar, 60000);
 wrap("initFormDropdowns", () => setTimeout(autoSelectRoundTrack, 0));
-
-window.addCalendarRound = async function () {
-    if (!canManageSys()) return alert("Brak uprawnień (wymagany Główny Steward lub uprawnienie SYS).");
-    const track = $("calTrack").value, date = $("calDate").value, label = $("calLabel").value.trim().slice(0, 40);
-    if (!track || !date) return alert("Wybierz tor i datę wyścigu.");
-    if (calendarRounds.some(r => r.date === date && r.track === track)) return alert("Ta runda jest już w kalendarzu.");
-    const ref = database.ref("settings/calendar/rounds").push();
-    await ref.set({ track, date, label: label || null });
-    await logAction(loggedInSteward.nick, "SYSTEM", "KALENDARZ", `Dodano rundę: ${track} (${date})${label ? " — " + label : ""}.`, { items: [{ path: `settings/calendar/rounds/${ref.key}`, data: null }] });
-    $("calLabel").value = "";
-    showToast("📅 Runda dodana", `${track} · ${date}`);
-};
-window.removeCalendarRound = async function (key) {
-    if (!canManageSys()) return;
-    const r = calendarRounds.find(x => x.key === key);
-    if (!r || !confirm(`Usunąć rundę ${r.track} (${r.date}) z kalendarza?`)) return;
-    const { key: _k, ...data } = r;
-    await database.ref(`settings/calendar/rounds/${key}`).remove();
-    await logAction(loggedInSteward.nick, "SYSTEM", "KALENDARZ", `Usunięto rundę: ${r.track} (${r.date}).`, { items: [{ path: `settings/calendar/rounds/${key}`, data }] });
-};
 
 /* ============================================================
    3. PUBLICZNA TABLICA DECYZJI + RANKING PUNKTÓW
@@ -16996,7 +16896,6 @@ database.ref("incidents").on("value", snap => {
     const run = () => {
         if ((globalIncidents || []).length !== expected && tries++ < 40) return setTimeout(run, 50);
         renderDecisions();
-        if ($("calendarAdminBox") && $("calendarAdminBox").style.display !== "none") renderCalendarAdmin();
         refreshDatalist();
     };
     setTimeout(run, 0);
@@ -17174,9 +17073,7 @@ if (importInput) importInput.addEventListener("change", () => { const f = import
    ============================================================ */
 wrap("applyStewardPermissions", function () {
     const show = (id, cond, disp) => { const el = $(id); if (el) el.style.display = cond ? (disp || "") : "none"; };
-    show("calendarAdminBox", canManageSys(), "block");
     show("btnImportDb", canManageSys());
-    renderCalendarAdmin();
     renderSuspensions();
 });
 wrap("renderAdmin", function () {
@@ -23665,7 +23562,7 @@ if (typeof origOpenNotif === "function") {
 /* ============================================================
    9. USTAWIENIA W PANELU (tylko akceptujący Główni Stewardzi)
    ============================================================ */
-const rulesAnchor = $("announcementAdminBox") || $("reportScheduleBox");
+const rulesAnchor = $("reportScheduleBox");
 if (rulesAnchor) rulesAnchor.insertAdjacentHTML("afterend", `
   <div id="verdictApprovalRulesBox" class="stats-group-box" style="display:none; border-color: rgba(16,185,129,0.5); margin-bottom: 14px;">
     <div class="stats-group-title" style="color:var(--green-text);">✅ Akceptacja werdyktów przez Głównych Stewardów</div>
