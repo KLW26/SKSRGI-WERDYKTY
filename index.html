@@ -1343,9 +1343,17 @@
       backdrop-filter: blur(4px);
       z-index: 100;
       display: none;
-      align-items: center;
+      /* FIX: gdy okno jest wyższe niż ekran (np. przy 100% zoomu), nakładka się przewija,
+         zamiast ucinać górę i dół okna (przyciski "Zapisz notatki" / "Zamknij"). */
+      align-items: flex-start;
       justify-content: center;
+      overflow-y: auto;
+      overscroll-behavior: contain;
+      padding: 20px;
+      box-sizing: border-box;
     }
+    /* margin:auto = wyśrodkowanie, gdy okno się mieści; gdy nie — start od góry + przewijanie */
+    .login-modal > .login-box, .desc-modal > .desc-box { margin: auto; max-width: 100%; }
     /* Modale logowania stewarda muszą być dostępne ponad nakładką blokady strony
        (z-index 999999), żeby Główny Steward / ROOT mógł się zalogować nawet, gdy
        strona jest zablokowana dla kierowców/zwykłych stewardów, i uzyskać dostęp. */
