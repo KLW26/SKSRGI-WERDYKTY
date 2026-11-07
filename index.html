@@ -760,6 +760,15 @@
     }
 
     /* === NAVIGATION MENU === */
+    /* === PRZEŁĄCZNIK LIG === */
+    .league-bar { display:flex; flex-wrap:wrap; align-items:center; gap:6px; padding:8px 14px; margin:0 0 4px; border-bottom:1px solid var(--border, rgba(255,255,255,.12)); }
+    .league-bar-label { font-size:11px; letter-spacing:1.5px; text-transform:uppercase; color:var(--text-dim); margin-right:4px; }
+    .league-slot { margin:0; padding:6px 12px; font-size:12px; letter-spacing:.5px; cursor:pointer; color:var(--text-dim); background:transparent; border:1px solid var(--border, rgba(255,255,255,.18)); }
+    .league-slot:hover { color:var(--text); border-color:var(--red); }
+    .league-slot.active { color:#fff; background:var(--red); border-color:var(--red); }
+    .league-slot.free { border-style:dashed; opacity:.75; }
+    .league-slot.free.active { opacity:1; }
+    .league-rename { margin:0 0 0 auto; padding:6px 12px; font-size:11px; display:none; }
     .menu {
       display: flex;
       gap: 0;
@@ -3436,6 +3445,12 @@
       </div>
     </div>
 
+    <div class="league-bar" id="leagueBar" role="tablist" aria-label="Liga">
+      <span class="league-bar-label" id="leagueBarLabel">Liga:</span>
+      <span id="leagueSlots" style="display:contents;"></span>
+      <button type="button" class="btn-secondary league-rename" id="leagueRenameBtn" title="Zmień nazwę aktywnej ligi">✎ Nazwa ligi</button>
+    </div>
+
     <div class="menu">
       <button onclick="showSection('formSection')" data-key="navNew">Nowe Zgłoszenie</button>
       <button class="btn-warning" onclick="showSection('appealSection')" data-key="navAppeal">Złóż Apelację</button>
@@ -4466,7 +4481,55 @@ const database = firebase.database();
 // accusedEvidence — stan prośby o dowód oskarżonego wysłanej przez bota na Discordzie (zapisuje Worker).
 const FIA_STAFF_FIELDS = ["notes", "stewardVotes", "assignedTo", "pendingVerdict", "accusedEvidence"];
 const FIA_STAFF_CHAT_KEY = "_staff";
-const fiaOrigRef = database.ref.bind(database);
+// ============================================================
+// === PRZEŁĄCZNIK LIG — osobne dane dla każdej ligi ===
+// ============================================================
+// Liga główna (slot 1) zostaje na dotychczasowych ścieżkach — nic się nie przenosi.
+// Sloty 2–7 trzymają swoje dane pod leagues/<id>/… (zgłoszenia, apelacje, liczniki, logi, kosz, czaty,
+// harmonogram zgłoszeń, sezon itd.). Wspólne dla wszystkich lig zostają: stewardzi/role, wygląd strony,
+// edytor treści, pliki dowodów. Zmiana ligi przeładowuje stronę (wszystkie nasłuchy startują od nowa).
+const FIA_LEAGUE_DEFAULT = "main";
+const FIA_LEAGUES = [
+    { id: "main", name: "Kordonowa Liga Wyścigowa" },
+    { id: "l2", name: "Liga 2" }, { id: "l3", name: "Liga 3" }, { id: "l4", name: "Liga 4" },
+    { id: "l5", name: "Liga 5" }, { id: "l6", name: "Liga 6" }, { id: "l7", name: "Liga 7" }
+];
+const FIA_LEAGUE_ROOTS = new Set(["incidents", "appeals", "staffIncidents", "caseStatements", "chats", "chat",
+    "trash", "incident_counter", "appeal_counter", "counters", "action_logs", "deleted_action_logs", "verdictTemplates"]);
+const FIA_LEAGUE_SETTINGS = new Set(["reportWindow", "season", "verdictApproval", "bulletin", "calendar", "suspensions", "announcement"]);
+const fiaLeagueId = (function () {
+    let id = null;
+    try { id = new URLSearchParams(location.search).get("liga"); } catch (e) {}
+    try { if (id) localStorage.setItem("fiaLeague", id); else id = localStorage.getItem("fiaLeague"); } catch (e) {}
+    return FIA_LEAGUES.some(l => l.id === id) ? id : FIA_LEAGUE_DEFAULT;
+})();
+const fiaLeagueIsDefault = fiaLeagueId === FIA_LEAGUE_DEFAULT;
+function fiaLeagueScope(path) {
+    if (fiaLeagueIsDefault || typeof path !== "string") return path;
+    const p = path.replace(/^\/+/, "");
+    if (!p || p.charAt(0) === ".") return path;
+    const seg = p.split("/");
+    if (FIA_LEAGUE_ROOTS.has(seg[0]) || (seg[0] === "settings" && FIA_LEAGUE_SETTINGS.has(seg[1]))) return "leagues/" + fiaLeagueId + "/" + p;
+    return path;
+}
+function fiaLeagueScopeKeys(values) {
+    if (fiaLeagueIsDefault || !values || typeof values !== "object") return values;
+    const out = {};
+    Object.keys(values).forEach(k => { out[fiaLeagueScope(k)] = values[k]; });
+    return out;
+}
+const fiaBaseRef = database.ref.bind(database);
+const fiaOrigRef = function (path) {
+    if (arguments.length === 0 || path === undefined || path === null || path === "") {
+        const root = fiaBaseRef();
+        if (!fiaLeagueIsDefault) {
+            const ou = root.update;
+            root.update = function (values, onComplete) { return ou.call(this, fiaLeagueScopeKeys(values), onComplete); };
+        }
+        return root;
+    }
+    return fiaBaseRef(fiaLeagueScope(path));
+};
 const fiaChatIndex = Object.create(null); // id wiadomości → węzeł, w którym leży ("chats/{sprawa}" albo stary "chat")
 let fiaLastIncidentsRaw = null;
 
@@ -24096,6 +24159,86 @@ wrap("renderAdmin", refreshButton);
 wrap("applyStewardPermissions", refreshButton);
 refreshButton();
 window.fiaEvidenceBulk = { eligible: eligibleAll, needsRequest, refresh: refreshButton };
+})();
+</script>
+
+
+<script>
+/* === PRZEŁĄCZNIK LIG — pasek, nazwy slotów, zmiana ligi === */
+(function () {
+    "use strict";
+    const CACHE = "fiaLeagueNames";
+    const pl = () => { try { return typeof uiIsPl === "function" ? uiIsPl() : true; } catch (e) { return true; } };
+    let names = {};
+    try { names = JSON.parse(localStorage.getItem(CACHE) || "{}") || {}; } catch (e) {}
+    const nameOf = l => (names[l.id] && String(names[l.id]).trim()) || l.name;
+    const isFree = l => l.id !== FIA_LEAGUE_DEFAULT && !(names[l.id] && String(names[l.id]).trim());
+
+    function render() {
+        const box = document.getElementById("leagueSlots");
+        if (!box) return;
+        box.innerHTML = "";
+        FIA_LEAGUES.forEach(l => {
+            const b = document.createElement("button");
+            b.type = "button";
+            b.className = "league-slot" + (l.id === fiaLeagueId ? " active" : "") + (isFree(l) ? " free" : "");
+            b.setAttribute("role", "tab");
+            b.setAttribute("aria-selected", l.id === fiaLeagueId ? "true" : "false");
+            b.textContent = nameOf(l) + (isFree(l) ? (pl() ? " (wolny slot)" : " (free slot)") : "");
+            b.addEventListener("click", () => switchLeague(l.id));
+            box.appendChild(b);
+        });
+        const lab = document.getElementById("leagueBarLabel");
+        if (lab) lab.textContent = pl() ? "Liga:" : "League:";
+        const cur = FIA_LEAGUES.find(l => l.id === fiaLeagueId);
+        try { document.title = nameOf(cur) + " – " + document.title.replace(/^.*? – /, ""); } catch (e) {}
+    }
+
+    function switchLeague(id) {
+        if (id === fiaLeagueId) return;
+        try { localStorage.setItem("fiaLeague", id); } catch (e) {}
+        const u = new URL(location.href);
+        u.searchParams.set("liga", id);
+        location.href = u.toString();
+    }
+
+    function canRename() {
+        try { return typeof stewardIsRootLike === "function" && stewardIsRootLike(); } catch (e) { return false; }
+    }
+    function refreshRename() {
+        const btn = document.getElementById("leagueRenameBtn");
+        if (btn) btn.style.display = canRename() ? "inline-block" : "none";
+    }
+
+    async function rename() {
+        if (!canRename()) return;
+        const cur = FIA_LEAGUES.find(l => l.id === fiaLeagueId);
+        const v = prompt(pl() ? "Nazwa tej ligi (puste = przywróć domyślną):" : "Name of this league (empty = reset):", nameOf(cur));
+        if (v === null) return;
+        const val = v.trim().slice(0, 40);
+        try {
+            if (val) await database.ref("settings/leagueSlots/" + fiaLeagueId).set(val);
+            else await database.ref("settings/leagueSlots/" + fiaLeagueId).remove();
+        } catch (e) {
+            console.error("[ligi] zapis nazwy:", e);
+            alert(pl() ? "Nie udało się zapisać nazwy ligi (sprawdź reguły bazy dla settings/leagueSlots)." : "Could not save the league name (check database rules for settings/leagueSlots).");
+        }
+    }
+
+    document.getElementById("leagueRenameBtn").addEventListener("click", rename);
+    render();
+    setInterval(refreshRename, 1500);
+    refreshRename();
+
+    try {
+        database.ref("settings/leagueSlots").on("value", snap => {
+            names = snap.val() || {};
+            try { localStorage.setItem(CACHE, JSON.stringify(names)); } catch (e) {}
+            render();
+        }, () => {});
+    } catch (e) { console.warn("[ligi] nazwy slotów:", e); }
+
+    window.fiaLeagues = { current: fiaLeagueId, list: FIA_LEAGUES, switchTo: switchLeague };
 })();
 </script>
 
