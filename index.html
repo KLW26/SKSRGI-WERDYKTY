@@ -3589,7 +3589,7 @@
       <div id="appealNoCasesOverlay" class="lock-overlay">
         <div class="discord-required-box">
           <svg class="lock-icon" width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="9"/><path d="M9 10h.01M15 10h.01M9 15a3.5 3.5 0 0 1 6 0"/></svg>
-          <p data-key="appealNoCasesMsg">Nie znaleziono żadnych Twoich zgłoszeń z wydanym werdyktem, od którego można się odwołać. Apelacja jest niedostępna, dopóki nie pojawi się taka sprawa na Twoim koncie.</p>
+          <p data-key="appealNoCasesMsg">Nie znaleziono żadnych Twoich zgłoszeń z wydanym werdyktem, od którego można się odwołać. Apelacja jest niedostępna, dopóki nie pojawi się taka sprawa na Twoim koncie. Dla każdej sprawy można złożyć tylko jedną apelację — jeśli ktoś już ją złożył, kolejna nie jest możliwa.</p>
         </div>
       </div>
 
@@ -5477,13 +5477,32 @@ function isWithinAppealWindow(decisionData) {
 // Zwraca sprawy danego kierowcy (po Discord ID), kwalifikujące się do apelacji: werdykt
 // wydany oraz wciąż w oknie APPEAL_WINDOW_HOURS. Współdzielone przez populateAppealCaseOptions
 // (lista w select) i applyAppealFormLock (blokada formularza gdy brak takich spraw).
+// Dla jednej sprawy można złożyć TYLKO JEDNĄ apelację (przez dowolną ze stron). Jeśli ktoś już ją
+// złożył — także gdy została odrzucona i sprawa wróciła do statusu "Werdykt wydany" — kolejna jest zablokowana.
+// Zapis apelacji razem z blokadą appeal_locks/<caseId> w JEDNEJ operacji atomowej. Reguły bazy
+// (patrz appeal_locks_rules.json) odrzucą całość, jeśli blokada dla tej sprawy już istnieje —
+// dzięki temu nie da się obejść ograniczenia konsolą przeglądarki ani własnym klientem.
+function writeAppealWithLock(appealKey, appealData) {
+    const updates = {};
+    updates["appeals/" + appealKey] = appealData;
+    const cid = String((appealData && appealData.caseId) || "").trim().toUpperCase();
+    if (cid) updates["appeal_locks/" + cid] = String((appealData && appealData.appealId) || appealKey);
+    return database.ref().update(updates);
+}
+
+function hasAppealForCase(caseId) {
+    const cid = String(caseId || "").trim().toUpperCase();
+    if (!cid) return false;
+    return (globalAppeals || []).some(a => a && String(a.caseId || "").trim().toUpperCase() === cid);
+}
+
 function getEligibleAppealCases(discordId) {
     const cleanDiscordId = String(discordId || "").trim();
     if (!cleanDiscordId) return [];
     return (globalIncidents || []).filter(r => {
         const isAccused = String(r.accusedDiscordId || "").trim() === cleanDiscordId;
         const isReporter = String(r.discordId || "").trim() === cleanDiscordId;
-        return (isAccused || isReporter) && r.status === "Werdykt wydany" && isWithinAppealWindow(r.decisionData);
+        return (isAccused || isReporter) && r.status === "Werdykt wydany" && isWithinAppealWindow(r.decisionData) && !hasAppealForCase(r.id);
     });
 }
 
@@ -7025,7 +7044,7 @@ const langData = {
         optChooseTrack: "Wybierz tor...", optChooseCat: "Wybierz przewinienie...",
         optChooseAppealCase: "Wybierz sprawę...", optNoAppealCases: "Brak spraw dostępnych do apelacji",
         appealCaseHint: "Nie masz obecnie żadnych spraw z wydanym werdyktem, od którego możesz się odwołać.",
-        appealNoCasesMsg: "Nie znaleziono żadnych Twoich zgłoszeń z wydanym werdyktem, od którego można się odwołać. Apelacja jest niedostępna, dopóki nie pojawi się taka sprawa na Twoim koncie.",
+        appealNoCasesMsg: "Nie znaleziono żadnych Twoich zgłoszeń z wydanym werdyktem, od którego można się odwołać. Apelacja jest niedostępna, dopóki nie pojawi się taka sprawa na Twoim koncie. Dla każdej sprawy można złożyć tylko jedną apelację — jeśli ktoś już ją złożył, kolejna nie jest możliwa.",
         sessions: ["Wyścig Główny", "Sprint", "Kwalifikacje", "Trening"],
         dcReportTitle: "🚩 NOWE ZGŁOSZENIE", dcDecisionTitle: "📢 STATUS ZGŁOSZENIA",
         dcLabelReporter: "👤 Zgłaszający", dcLabelAgainst: "🏎️ Przeciwko",
@@ -8594,6 +8613,26 @@ document.getElementById("appealForm").addEventListener("submit", async e => {
         return;
     }
 
+    // Jedna apelacja na sprawę: sprawdzamy świeże dane z bazy (nie tylko lokalną listę), bo ktoś mógł
+    // złożyć apelację chwilę wcześniej. Gdy zapytanie się nie powiedzie, korzystamy z lokalnej listy.
+    const alreadyAppealedMsg = currentLang === 'pl'
+        ? `Dla sprawy ${caseId} została już złożona apelacja — można złożyć tylko jedną apelację na sprawę.`
+        : `An appeal has already been filed for case ${caseId} — only one appeal per case is allowed.`;
+    let appealAlreadyExists = hasAppealForCase(caseId);
+    if (!appealAlreadyExists) {
+        try {
+            const dupSnap = await database.ref("appeals").orderByChild("caseId").equalTo(caseId).limitToFirst(1).get();
+            appealAlreadyExists = dupSnap.exists();
+        } catch (dupErr) {
+            console.warn("Nie udało się sprawdzić istniejących apelacji w bazie — użyto listy lokalnej:", dupErr);
+        }
+    }
+    if (appealAlreadyExists) {
+        alert(alreadyAppealedMsg);
+        populateAppealCaseOptions(discordDriverAuth.id);
+        return;
+    }
+
     const appealCounterTx = await database.ref("appeal_counter").transaction(c => (typeof c === "number" ? c : 0) + 1);
     if (!appealCounterTx.committed) throw new Error(currentLang === 'pl' ? "Nie udało się nadać numeru apelacji — spróbuj ponownie." : "Could not assign an appeal number — try again.");
     const appealCounter = appealCounterTx.snapshot.val();
@@ -8613,8 +8652,21 @@ document.getElementById("appealForm").addEventListener("submit", async e => {
         }
     }
 
-    await stampRateLimit("appeal", appealId);
-    await database.ref("appeals/" + appealId).set(newAppeal);
+    // Kolejność zgodna z regułami bazy: najpierw apelacja + blokada sprawy (jedna operacja atomowa),
+    // dopiero potem zmiana statusu sprawy (reguła wymaga, by apelacja już istniała).
+    try {
+        await stampRateLimit("appeal", appealId);
+        await writeAppealWithLock(appealId, newAppeal);
+    } catch (writeErr) {
+        // Reguły bazy odrzuciły zapis, bo blokada dla tej sprawy już istnieje (apelacja złożona wcześniej).
+        const wc = String((writeErr && (writeErr.code || writeErr.message)) || "").toUpperCase();
+        if (wc.includes("PERMISSION_DENIED")) {
+            alert(alreadyAppealedMsg);
+            populateAppealCaseOptions(discordDriverAuth.id);
+            return;
+        }
+        throw writeErr;
+    }
     await database.ref("incidents/" + caseId + "/status").set("W apelacji");
     await logAction(nick || discordId || "Kierowca", "APPEAL", caseId, `Złożono apelację ${appealId} od decyzji w sprawie ${caseId}.`);
 
@@ -11985,7 +12037,7 @@ async function restoreTrashItem(trashId) {
         if (item.type === "incident") {
             await database.ref("incidents/" + item.originalId).set(item.data);
         } else if (item.type === "appeal") {
-            await database.ref("appeals/" + item.originalId).set(item.data);
+            await writeAppealWithLock(item.originalId, item.data);
         } else if (item.type === "chat_bulk") {
             await database.ref().update(fiaChatDataToUpdates(item.data));
         } else if (item.type === "verdict") {
@@ -12021,7 +12073,7 @@ async function restoreAllTrash() {
             if (item.type === "incident") {
                 await database.ref("incidents/" + item.originalId).set(item.data);
             } else if (item.type === "appeal") {
-                await database.ref("appeals/" + item.originalId).set(item.data);
+                await writeAppealWithLock(item.originalId, item.data);
             } else if (item.type === "chat_bulk") {
                 await database.ref().update(fiaChatDataToUpdates(item.data));
             } else if (item.type === "verdict") {
@@ -13832,6 +13884,8 @@ window.addEventListener("DOMContentLoaded", () => {
             });
         }
         knownAppealIds = currentAppealIds;
+        // Ktoś właśnie złożył / usunął apelację — odśwież listę spraw i blokadę formularza apelacji.
+        try { if (typeof discordDriverAuth !== "undefined" && discordDriverAuth) populateAppealCaseOptions(discordDriverAuth.id); } catch (_) {}
         if (authorizedHistoryDiscordId) {
             fetchAndRenderHistory(authorizedHistoryDiscordId);
             updatePlayerChatCaseSelectOptions(authorizedHistoryDiscordId);
