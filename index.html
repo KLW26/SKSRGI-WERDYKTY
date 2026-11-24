@@ -1516,6 +1516,26 @@
     .appeal-ev-body .evidence-gallery { margin-top: 4px; gap: 6px; }
     .appeal-ev-body .evidence-thumb { max-width: 110px; max-height: 80px; }
     .appeal-ev-body .evidence-video { max-width: 180px; max-height: 120px; }
+    /* === DOWÓD OSKARŻONEGO Z CZATU Z SĘDZIAMI — wybór w formularzu werdyktu i przycisk w czacie === */
+    .chat-ev-list { display: flex; flex-direction: column; gap: 6px; max-height: 340px; overflow-y: auto; }
+    .chat-ev-list:empty { display: none; }
+    .chat-ev-item {
+      display: flex; gap: 10px; align-items: flex-start; cursor: pointer;
+      border: 1px solid var(--border); border-left: 3px solid #ef4444; border-radius: 3px;
+      background: var(--bg-input); padding: 8px 10px; min-width: 0;
+    }
+    .chat-ev-item.picked { border-color: var(--gold-dim); border-left-color: #ef4444; background: rgba(239,68,68,0.09); }
+    .chat-ev-item input[type="checkbox"] { width: auto; margin: 3px 0 0; flex: 0 0 auto; cursor: pointer; }
+    .chat-ev-main { flex: 1; min-width: 0; font-size: 12px; word-break: break-word; }
+    .chat-ev-meta { font-size: 10px; color: var(--text-dim); letter-spacing: 0.4px; margin-bottom: 3px; }
+    .chat-ev-text { color: var(--text); white-space: pre-wrap; margin-bottom: 4px; }
+    .chat-ev-main .chat-thumb { max-width: 150px; max-height: 100px; }
+    .chat-ev-pick-btn {
+      display: block; margin-top: 6px; font-size: 11px; padding: 4px 10px; cursor: pointer;
+      background: var(--bg-input); color: var(--text-dim); border: 1px solid var(--border); border-radius: 3px;
+    }
+    .chat-ev-pick-btn:hover { color: var(--text); border-color: var(--gold-dim); }
+    .chat-ev-pick-btn.on { color: #10b981; border-color: rgba(16,185,129,0.55); background: rgba(16,185,129,0.08); }
     /* Dowody z oświadczeń stron w zgłoszeniu (np. dowód oskarżonego przysłany przez Discord) */
     .inc-ev-stmt { margin-top: 4px; padding-top: 4px; border-top: 1px dashed var(--border); }
     .appeal-ev-body > .inc-ev-stmt:first-child { margin-top: 0; padding-top: 0; border-top: none; }
@@ -4040,6 +4060,12 @@
             </div>
           </div>
   
+          <div class="field" id="verdictChatEvBox" style="display:none;">
+            <label>💬 Dowód oskarżonego z czatu z sędziami</label>
+            <div id="verdictChatEvList" class="chat-ev-list"></div>
+            <small id="verdictChatEvHint" style="display:block; margin-top:4px; font-size:11px; color: var(--text-dim);"></small>
+          </div>
+
           <div class="field">
             <label for="verdictDetails" data-key="detailsLabel">Uzasadnienie</label>
             <textarea id="verdictDetails" placeholder="Opisz decyzję..." required style="min-height:80px; max-height:200px;"></textarea>
@@ -6799,7 +6825,8 @@ function renderIncidentEvidencePairHtml(report, linkLabel) {
     const sts = caseStatementsByRole(report);
     const main = evidenceRecordWithList(report);
     const reporterBody = (hasEvidence(main) ? renderEvidenceHtml(main, linkLabel, "") : "") + incidentStatementEvidenceHtml(sts.reporter, linkLabel);
-    const accusedBody = incidentStatementEvidenceHtml(sts.accused, linkLabel);
+    const accusedBody = incidentStatementEvidenceHtml(sts.accused, linkLabel) +
+        chatEvidenceHtml(report.decisionData && report.decisionData.chatEvidence);
     return `<div class="appeal-ev-pair">` +
         block("🚩", pl ? "Dowód zgłaszającego" : "Reporter's evidence", report.nick, reporterBody || dim(pl ? "Brak" : "None"), "#3b82f6") +
         block("🏎️", pl ? "Dowód oskarżonego" : "Accused's evidence", report.accusedNick, accusedBody || dim(accusedEvidenceStateText(report)), "#ef4444") +
@@ -6853,13 +6880,16 @@ async function buildPartyEvidenceText(sources) {
     return parts.join("\n");
 }
 
-async function buildVerdictPartyEvidenceFields(report, appeal, lang) {
+async function buildVerdictPartyEvidenceFields(report, appeal, lang, chatEvidence) {
     const pl = (lang || currentLang) === 'pl';
     const none = pl ? "Brak" : "None";
     const sts = caseStatementsByRole(report);
     const stLabel = pl ? "📝 Z oświadczenia:" : "📝 From statement:";
     const reporterSources = [{ label: null, rec: report }].concat(sts.reporter.map(s => ({ label: stLabel, rec: s })));
     const accusedSources = sts.accused.map(s => ({ label: stLabel, rec: s }));
+    // Dowód, który oskarżony wysłał na czacie z sędziami, a sędzia dołączył do werdyktu.
+    const chatLabel = pl ? "💬 Z czatu z sędziami:" : "💬 From the judges' chat:";
+    sanitizeChatEvidence(chatEvidence).forEach(it => accusedSources.push({ label: chatLabel, rec: it }));
     let otherAppellant = null;
     if (appeal) {
         const apLabel = pl ? `⚖️ Z apelacji ${appeal.appealId || ""}:` : `⚖️ From appeal ${appeal.appealId || ""}:`;
@@ -9846,7 +9876,7 @@ async function resendVerdict(id) {
         const isAppealVerdict = globalAppeals.some(a => a.caseId === id && a.status === "Zakończona");
         const resendAppealRec = isAppealVerdict ? findConcludedAppealForCase(id) : null;
         let resendEvidenceFields = [{ name: t.fieldEvidence, value: dcFieldValue(mainEvidence), inline: false }];
-        try { resendEvidenceFields = await buildVerdictPartyEvidenceFields(report, resendAppealRec, currentLang); }
+        try { resendEvidenceFields = await buildVerdictPartyEvidenceFields(report, resendAppealRec, currentLang, d.chatEvidence); }
         catch (evErr) { console.warn("Nie udało się przygotować dowodów stron dla Discorda:", evErr); }
 
         const resendApprovedNames = (Array.isArray(d.approvedBy) ? d.approvedBy : (d.approvedBy && typeof d.approvedBy === "object" ? Object.values(d.approvedBy) : []))
@@ -10797,6 +10827,9 @@ async function publishVerdict(draft) {
     if (approvedBy.length) decisionDataToSave.approvedBy = approvedBy;
     if (extraDecisions.length) decisionDataToSave.extraDecisions = extraDecisions;
     if (Object.keys(customFields).length) decisionDataToSave.customFields = customFields;
+    // Dowód oskarżonego wybrany z jego wiadomości na czacie z sędziami (zapisany jako kopia — patrz sanitizeChatEvidence).
+    const chatEvidence = sanitizeChatEvidence(draft.chatEvidence);
+    if (chatEvidence.length) decisionDataToSave.chatEvidence = chatEvidence;
     // Werdykt apelacji nadpisuje decisionData sprawy — zanim to zrobimy, zachowujemy
     // pierwotny werdykt (i jego ewentualną wcześniejszą historię apelacji) w polu
     // previousDecisionData, żeby po wydaniu werdyktu apelacji nadal było widać,
@@ -10829,7 +10862,7 @@ async function publishVerdict(draft) {
     // trafia do pola strony, która ją złożyła.
     const publishAppealRec = (isAppealVerdict && draft.appealId) ? (globalAppeals || []).find(a => a.appealId === draft.appealId) : null;
     let evidenceFields = [{ name: t.fieldEvidence, value: dcFieldValue(mainEvidence), inline: false }];
-    try { evidenceFields = await buildVerdictPartyEvidenceFields(mainReport, publishAppealRec, currentLang); }
+    try { evidenceFields = await buildVerdictPartyEvidenceFields(mainReport, publishAppealRec, currentLang, chatEvidence); }
     catch (evErr) { console.warn("Nie udało się przygotować dowodów stron dla Discorda:", evErr); }
 
     const reporterNick = (mainReport && mainReport.nick) ? mainReport.nick : unknownLabel;
@@ -11020,6 +11053,7 @@ document.getElementById("responseForm").addEventListener("submit", async (e) => 
         caseIdInput, originalCaseId, appealId, isAppealVerdict,
         decision, timePenalty, pointsPenalty, verdictDetails, judge,
         extraDecisions: collectExtraDecisions(),
+        chatEvidence: (typeof window.fiaCollectChatEvidence === "function" ? window.fiaCollectChatEvidence(originalCaseId) : []),
         customFields: (typeof window.cfCollect === "function" ? window.cfCollect("verdict") : {}),
         judgeId: loggedInSteward ? String(loggedInSteward.id || "") : "",
         accusedId: verdictNoOneGuilty ? null : (accusedId || null),
@@ -11345,12 +11379,90 @@ function verdictCustomLines(d) {
         });
 }
 
+/* === DOWÓD OSKARŻONEGO Z CZATU Z SĘDZIAMI ===
+   Gdy oskarżony wyśle dowód (plik / link) na czacie sprawy, sędzia zaznacza tę wiadomość w formularzu
+   werdyktu (albo przyciskiem przy wiadomości w czacie sędziów). Zapisujemy KOPIĘ w
+   decisionData.chatEvidence[] — dzięki temu dowód zostaje w werdykcie, nawet gdy czat zostanie wyczyszczony.
+   Wpis: { msgKey, ts, nick, userDiscordId, text, evidence (linki, po jednym w linii), evidenceFiles[] }.
+   Ma ten sam kształt (evidence / evidenceFiles) co oświadczenia stron, więc korzystają z niego te same
+   funkcje budujące pola Discorda i widoki dowodów. */
+function sanitizeChatEvidence(src) {
+    const arr = Array.isArray(src) ? src : (src && typeof src === "object" ? Object.values(src) : []);
+    const out = [];
+    arr.forEach(x => {
+        if (!x || typeof x !== "object") return;
+        const filesRaw = Array.isArray(x.evidenceFiles) ? x.evidenceFiles
+            : (x.evidenceFiles && typeof x.evidenceFiles === "object" ? Object.values(x.evidenceFiles) : []);
+        const files = filesRaw
+            .filter(f => f && typeof f === "object" && (f.key || (f.url && /^https?:\/\//i.test(String(f.url)))))
+            .slice(0, MAX_EVIDENCE_FILES)
+            .map(f => {
+                const o = { name: String(f.name || "plik").slice(0, 200) };
+                if (f.key) o.key = String(f.key);
+                if (f.url && /^https?:\/\//i.test(String(f.url))) o.url = String(f.url).slice(0, 1000);
+                if (Number(f.size) > 0) o.size = Number(f.size);
+                if (f.type) o.type = String(f.type).slice(0, 100);
+                return o;
+            });
+        const evidence = String(x.evidence || "").trim().slice(0, 1000);
+        if (!files.length && !evidence) return;
+        const item = {
+            msgKey: String(x.msgKey || "").slice(0, 100),
+            ts: Number(x.ts) || 0,
+            nick: String(x.nick || "").slice(0, 100),
+            text: String(x.text || "").slice(0, 500)
+        };
+        if (x.userDiscordId) item.userDiscordId = String(x.userDiscordId).slice(0, 30);
+        if (evidence) item.evidence = evidence;
+        if (files.length) item.evidenceFiles = files;
+        out.push(item);
+    });
+    return out.slice(0, 10);
+}
+
+function chatEvidenceLinks(it) {
+    return String((it && it.evidence) || "").split(/\s+/).filter(u => /^https?:\/\//i.test(u));
+}
+
+// Pełny widok (kolumna „Dowody” w sprawie, podgląd werdyktu): wiadomość + linki + miniatury / przyciski plików.
+function chatEvidenceHtml(list) {
+    const items = sanitizeChatEvidence(list);
+    if (!items.length) return "";
+    const pl = currentLang === 'pl';
+    return items.map(it => {
+        const head = `💬 ${pl ? "Z czatu z sędziami" : "From the judges' chat"}${it.ts ? " · " + formatTimestamp(it.ts) : ""}`;
+        const txt = String(it.text || "").trim();
+        const short = txt.length > 140 ? txt.slice(0, 140) + "…" : txt;
+        const linksHtml = chatEvidenceLinks(it).map(u =>
+            `<a class="evidence-link" href="${escapeHtml(safeUrl(u))}" target="_blank" rel="noopener">🔗 ${escapeHtml(u.length > 60 ? u.slice(0, 59) + "…" : u)}</a>`
+        ).join("<br>");
+        const filesHtml = it.evidenceFiles && it.evidenceFiles.length ? renderChatFilesHtml(it.evidenceFiles) : "";
+        return `<div class="inc-ev-stmt"><div class="inc-ev-stmt-head">${escapeHtml(head)}</div>` +
+            (short ? `<div class="inc-ev-stmt-text" title="${escapeHtml(txt)}">„${escapeHtml(short)}”</div>` : "") +
+            linksHtml + filesHtml + `</div>`;
+    }).join("");
+}
+
+// Krótki wiersz do kart werdyktu (kończy się <br>, jak extraDecisionsHtml).
+function verdictChatEvidenceHtml(d) {
+    const items = sanitizeChatEvidence(d && d.chatEvidence);
+    if (!items.length) return "";
+    const pl = currentLang === 'pl';
+    const files = items.reduce((n, it) => n + (it.evidenceFiles ? it.evidenceFiles.length : 0), 0);
+    const links = items.reduce((n, it) => n + chatEvidenceLinks(it).length, 0);
+    const parts = [];
+    if (files) parts.push((pl ? "załączników: " : "attachments: ") + files);
+    if (links) parts.push((pl ? "linków: " : "links: ") + links);
+    return `<strong>${pl ? "Dowód oskarżonego z czatu" : "Accused's evidence from chat"}:</strong> <span style="color:#cbd5e1;">${escapeHtml(parts.join(", "))}</span><br>`;
+}
+
 // Blok HTML do kart werdyktu (kończy się <br>, jak extraDecisionsHtml).
 function verdictCustomHtml(d) {
     const lines = verdictCustomLines(d);
-    if (!lines.length) return "";
+    const chatEvLine = verdictChatEvidenceHtml(d);
+    if (!lines.length) return chatEvLine;
     const pl = currentLang === 'pl';
-    return `<strong>${pl ? 'Dodatkowe rubryki' : 'Additional fields'}:</strong><br>` +
+    return chatEvLine + `<strong>${pl ? 'Dodatkowe rubryki' : 'Additional fields'}:</strong><br>` +
         lines.map(x => `<span style="color:#cbd5e1;">${escapeHtml(x.label)}: ${x.html}</span><br>`).join("");
 }
 
@@ -12192,9 +12304,9 @@ function renderAdminChatBox() {
     const selectedCaseId = document.getElementById("chatCaseSelect")?.value || "";
     if (!selectedCaseId || !globalChatData) return;
 
-    Object.values(globalChatData)
-        .filter(m => (m.caseId || "Ogólny") === selectedCaseId)
-        .forEach(m => {
+    Object.entries(globalChatData)
+        .filter(([, m]) => m && (m.caseId || "Ogólny") === selectedCaseId)
+        .forEach(([msgKey, m]) => {
             const isSteward = (m.role === "steward" || m.nick === "Steward" || m.nick === "Head Steward");
             const msgClass = isSteward ? "msg msg-steward" : "msg msg-player";
 
@@ -12222,6 +12334,11 @@ function renderAdminChatBox() {
                     filesWrap.innerHTML = filesHtml;
                     wrapper.appendChild(filesWrap);
                 }
+            }
+
+            // Wiadomość oskarżonego z załącznikiem/linkiem — przycisk „Dodaj do werdyktu” (moduł na końcu pliku).
+            if (typeof window.fiaChatEvAttachBtn === "function") {
+                try { window.fiaChatEvAttachBtn(wrapper, msgKey, m); } catch (e) { console.warn("[dowód z czatu]", e); }
             }
 
             adminChatBox.appendChild(wrapper);
@@ -14640,11 +14757,14 @@ document.addEventListener("submit", e => {
     if (!e.target || e.target.id !== "responseForm") return;
     const g = id => ((document.getElementById(id) || {}).value || "").trim();
     const noOne = typeof verdictNoOneGuilty !== "undefined" && verdictNoOneGuilty;
+    let chatEvN = 0;
+    try { chatEvN = typeof window.fiaCollectChatEvidence === "function" ? window.fiaCollectChatEvidence(g("caseId")).length : 0; } catch (err) {}
+    const chatEvLine = chatEvN ? "Dowód oskarżonego z czatu: " + chatEvN + " wiad.\n" : "";
     const msg = "Wysłać werdykt?\n\n" +
         "Sprawa: " + g("caseId") + "\n" +
         "Decyzja: " + g("decision") + "\n" +
         "Kara: " + (g("timePenalty") || "brak") + " / " + (g("pointsPenalty") || "0") + " pkt\n" +
-        "Ping: " + (noOne ? "nikt (nikt nie winny)" : (g("accusedId") || "—")) + "\n\n" +
+        "Ping: " + (noOne ? "nikt (nikt nie winny)" : (g("accusedId") || "—")) + "\n" + chatEvLine + "\n" +
         (window.fiaVerdictApproval && window.fiaVerdictApproval.required()
             ? "Werdykt trafi najpierw do akceptacji Głównych Stewardów (wymagane akceptacje: " + window.fiaVerdictApproval.need() + "). Na Discordzie pojawi się dopiero po zatwierdzeniu."
             : "Werdykt zostanie opublikowany na Discordzie.");
@@ -23226,6 +23346,7 @@ function fillVerdictForm(r, pv) {
     clearExtraDecisionRows();
     getExtraDecisions(d).forEach(x => addExtraDecisionRow(x));
     if (typeof window.cfFillForm === "function") window.cfFillForm("verdict", d.customFields);
+    if (typeof window.fiaChatEvRestore === "function") window.fiaChatEvRestore(r.id, d.chatEvidence);
     $("verdictDetails").value = d.verdictDetails || "";
     if (d.noOneGuilty) {
         pickGuiltyParty("none");
@@ -24150,6 +24271,260 @@ wrap("renderAdmin", refreshButton);
 wrap("applyStewardPermissions", refreshButton);
 refreshButton();
 window.fiaEvidenceBulk = { eligible: eligibleAll, needsRequest, refresh: refreshButton };
+})();
+</script>
+
+<script>
+/* ============================================================
+   === DOWÓD OSKARŻONEGO Z CZATU Z SĘDZIAMI — DODAWANIE DO WERDYKTU ===
+   ============================================================
+   Oskarżony pisze do sędziów na czacie sprawy (zakładka „Czat”) i może dołączyć pliki / linki.
+   Takie wiadomości sędzia może dodać do werdyktu jako „Dowód oskarżonego”:
+     • w formularzu werdyktu (pod „ID sprawy”) pojawia się lista wiadomości oskarżonego z załącznikami
+       lub linkami — zaznaczasz te, które mają trafić do werdyktu,
+     • w czacie sędziów przy takiej wiadomości jest przycisk „Dodaj do werdyktu” — zaznacza ją w tym
+       samym miejscu, bez przechodzenia do formularza.
+   Wybór jest zapamiętany osobno dla każdej sprawy (do wydania werdyktu / odświeżenia strony).
+   Zaznaczone wiadomości trafiają do decisionData.chatEvidence i do pola „Dowód oskarżonego” w werdykcie
+   na Discordzie (też przy „Wyślij ponownie”), a w tabeli zgłoszeń — do kolumny „Dowody”.
+   Pasują tylko wiadomości od osoby z Discord ID oskarżonego z danej sprawy (także z czatów jej apelacji).
+   ============================================================ */
+(function () {
+"use strict";
+
+const $ = id => document.getElementById(id);
+const L = (p, e) => (typeof currentLang !== "undefined" && currentLang === "en") ? e : p;
+const URL_RE = /https?:\/\/[^\s<>"']+/gi;
+
+const selByCase = new Map();   // ID sprawy → Set kluczy wiadomości zaznaczonych do werdyktu
+const snapByCase = new Map();  // ID sprawy → Map(klucz → zapisany wpis), gdy wpis wrócił z szkicu werdyktu
+let lastSig = "";
+
+const selOf = caseId => { let s = selByCase.get(caseId); if (!s) { s = new Set(); selByCase.set(caseId, s); } return s; };
+const snapsOf = caseId => { let m = snapByCase.get(caseId); if (!m) { m = new Map(); snapByCase.set(caseId, m); } return m; };
+
+function filesOf(m) {
+    const f = m && m.files;
+    return Array.isArray(f) ? f.filter(Boolean) : (f && typeof f === "object" ? Object.values(f).filter(Boolean) : []);
+}
+function linksOf(m) {
+    const found = String((m && m.text) || "").match(URL_RE) || [];
+    return found.map(u => u.replace(/[)\].,;!?]+$/, "")).filter((u, i, a) => u && a.indexOf(u) === i);
+}
+const hasEv = m => filesOf(m).length > 0 || linksOf(m).length > 0;
+
+// Sprawa, której dotyczy czat o danym ID (ID zgłoszenia albo ID apelacji do niego).
+function caseOfChat(chatCaseId) {
+    const incs = typeof globalIncidents !== "undefined" ? globalIncidents : [];
+    const inc = incs.find(r => r.id === chatCaseId);
+    if (inc) return inc;
+    const aps = typeof globalAppeals !== "undefined" ? globalAppeals : [];
+    const ap = aps.find(a => a.appealId === chatCaseId);
+    return ap ? (incs.find(r => r.id === ap.caseId) || null) : null;
+}
+const isAccusedMsg = (m, inc) => !!(m && inc && m.role === "player" && inc.accusedDiscordId &&
+    String(m.userDiscordId || "") === String(inc.accusedDiscordId));
+
+// [[klucz, wiadomość], …] — wiadomości oskarżonego z załącznikiem lub linkiem w czatach tej sprawy (i jej apelacji).
+function accusedMessages(inc) {
+    if (!inc || typeof globalChatData === "undefined" || !globalChatData) return [];
+    return Object.entries(globalChatData).filter(([, m]) => {
+        if (!m || !isAccusedMsg(m, inc) || !hasEv(m)) return false;
+        const c = caseOfChat(m.caseId);
+        return !!c && c.id === inc.id;
+    });
+}
+
+// Kopia wiadomości zapisywana w werdykcie (tylko to, co potrzebne; bez pól Firebase typu undefined).
+function snapshot(key, m) {
+    const files = filesOf(m).map(f => {
+        const o = { name: String(f.name || "plik") };
+        if (f.key) o.key = String(f.key);
+        if (f.url && /^https?:\/\//i.test(String(f.url))) o.url = String(f.url);
+        if (Number(f.size) > 0) o.size = Number(f.size);
+        if (f.type) o.type = String(f.type);
+        return o;
+    }).filter(f => f.key || f.url);
+    const item = {
+        msgKey: String(key),
+        ts: Number(m.timestamp) || 0,
+        nick: String(m.nick || ""),
+        userDiscordId: String(m.userDiscordId || ""),
+        text: String(m.text || "")
+    };
+    const links = linksOf(m);
+    if (links.length) item.evidence = links.join("\n");
+    if (files.length) item.evidenceFiles = files;
+    return item;
+}
+
+// Wybrane wiadomości jako wpisy do decisionData.chatEvidence. Sprawę bierzemy z ID (lub z formularza).
+function collect(caseIdLike) {
+    const incs = typeof globalIncidents !== "undefined" ? globalIncidents : [];
+    const norm = x => String(x || "").trim().replace(/^#/, "").toUpperCase();
+    let inc = incs.find(r => norm(r.id) === norm(caseIdLike)) || null;
+    if (!inc && typeof verdictCaseFromForm === "function") inc = verdictCaseFromForm();
+    if (!inc) return [];
+    const sel = selByCase.get(inc.id);
+    if (!sel || !sel.size) return [];
+    const live = new Map(accusedMessages(inc));
+    const snaps = snapByCase.get(inc.id);
+    const out = [];
+    sel.forEach(key => {
+        if (live.has(key)) out.push(snapshot(key, live.get(key)));
+        else if (snaps && snaps.has(key)) out.push(snaps.get(key));
+    });
+    return out.sort((a, b) => (a.ts || 0) - (b.ts || 0)).filter(x => x.evidence || (x.evidenceFiles && x.evidenceFiles.length));
+}
+
+function itemHtml(it, picked) {
+    const when = it.ts ? formatTimestamp(it.ts) : "";
+    const txt = String(it.text || "").trim();
+    const short = txt.length > 300 ? txt.slice(0, 300) + "…" : txt;
+    const links = String(it.evidence || "").split(/\s+/).filter(Boolean).map(u =>
+        `<a class="evidence-link" href="${escapeHtml(safeUrl(u))}" target="_blank" rel="noopener">🔗 ${escapeHtml(u.length > 70 ? u.slice(0, 69) + "…" : u)}</a>`
+    ).join("<br>");
+    const files = it.evidenceFiles && it.evidenceFiles.length && typeof renderChatFilesHtml === "function" ? renderChatFilesHtml(it.evidenceFiles) : "";
+    return `<div class="chat-ev-item${picked ? " picked" : ""}" data-key="${escapeHtml(it.msgKey)}">` +
+        `<input type="checkbox" data-key="${escapeHtml(it.msgKey)}"${picked ? " checked" : ""} aria-label="${escapeHtml(L("Dodaj do werdyktu", "Add to the verdict"))}">` +
+        `<div class="chat-ev-main"><div class="chat-ev-meta">🏎️ ${escapeHtml(it.nick || "?")}${when ? " · " + escapeHtml(when) : ""}</div>` +
+        (short ? `<div class="chat-ev-text">${escapeHtml(short)}</div>` : "") + links + files + `</div></div>`;
+}
+
+function render(force) {
+    const box = $("verdictChatEvBox"), list = $("verdictChatEvList"), hint = $("verdictChatEvHint");
+    if (!box || !list || !hint) return;
+    const inc = typeof verdictCaseFromForm === "function" ? verdictCaseFromForm() : null;
+    if (!inc) { box.style.display = "none"; lastSig = ""; return; }
+
+    const msgs = accusedMessages(inc);
+    const liveKeys = new Set(msgs.map(([k]) => k));
+    const sel = selOf(inc.id);
+    const snaps = snapByCase.get(inc.id);
+    // Wpisy z szkicu werdyktu, których wiadomości już nie ma na czacie (np. czat wyczyszczono) — nadal pokazujemy.
+    const orphans = snaps ? [...snaps.entries()].filter(([k]) => !liveKeys.has(k)) : [];
+
+    const sig = [inc.id, msgs.map(([k]) => k).join(","), orphans.map(([k]) => k).join(","), [...sel].sort().join(","),
+        (typeof currentLang !== "undefined" ? currentLang : "")].join("|");
+    if (!force && sig === lastSig) return;
+    lastSig = sig;
+
+    box.style.display = "";
+    const items = msgs.map(([k, m]) => snapshot(k, m)).concat(orphans.map(([, it]) => it));
+    list.innerHTML = items.map(it => itemHtml(it, sel.has(it.msgKey))).join("");
+
+    if (!inc.accusedDiscordId) {
+        hint.textContent = L("To zgłoszenie nie ma Discord ID oskarżonego — nie da się dopasować jego wiadomości z czatu.",
+            "This report has no accused Discord ID, so the accused's chat messages cannot be matched.");
+    } else if (!items.length) {
+        hint.textContent = L("Oskarżony nie wysłał na czacie z sędziami żadnych załączników ani linków w tej sprawie.",
+            "The accused has not sent any attachments or links in the judges' chat for this case.");
+    } else {
+        const n = items.filter(it => sel.has(it.msgKey)).length;
+        hint.textContent = L(`Zaznaczone: ${n}. Trafią do pola „Dowód oskarżonego” w werdykcie (Discord i podgląd sprawy).`,
+            `Selected: ${n}. They go to the “Accused's evidence” field of the verdict (Discord and case view).`);
+    }
+}
+
+function refreshBtns() {
+    document.querySelectorAll("#chatBox .chat-ev-pick-btn").forEach(paintBtn);
+}
+
+function setPicked(caseId, key, on) {
+    const sel = selOf(caseId);
+    if (on) sel.add(key); else sel.delete(key);
+    render(true);
+    refreshBtns();
+}
+
+function paintBtn(btn) {
+    const on = selOf(btn.dataset.case).has(btn.dataset.key);
+    btn.classList.toggle("on", on);
+    btn.textContent = on
+        ? L("✅ Dodane do werdyktu — kliknij, aby cofnąć", "✅ Added to the verdict — click to undo")
+        : L("⚖️ Dodaj do werdyktu jako dowód oskarżonego", "⚖️ Add to the verdict as the accused's evidence");
+}
+
+// Przycisk przy wiadomości oskarżonego w czacie sędziów (wywoływany z renderAdminChatBox).
+window.fiaChatEvAttachBtn = function (wrapper, key, m) {
+    const inc = caseOfChat(m && m.caseId);
+    if (!inc || !isAccusedMsg(m, inc) || !hasEv(m)) return;
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "chat-ev-pick-btn";
+    btn.dataset.key = key;
+    btn.dataset.case = inc.id;
+    paintBtn(btn);
+    btn.addEventListener("click", () => {
+        const on = !selOf(inc.id).has(key);
+        setPicked(inc.id, key, on);
+        if (typeof showToast === "function") {
+            showToast(on ? L("⚖️ Dodano do werdyktu", "⚖️ Added to the verdict") : L("↩️ Cofnięto", "↩️ Removed"),
+                on ? L(`Dowód oskarżonego z czatu trafi do werdyktu sprawy ${inc.fiaId || inc.id}.`, `The accused's chat evidence will go into the verdict of case ${inc.fiaId || inc.id}.`)
+                   : L(`Wiadomość nie trafi do werdyktu sprawy ${inc.fiaId || inc.id}.`, `The message will not go into the verdict of case ${inc.fiaId || inc.id}.`));
+        }
+    });
+    wrapper.appendChild(btn);
+};
+
+window.fiaCollectChatEvidence = collect;
+
+// Przywraca wybór ze szkicu werdyktu („Popraw w formularzu”).
+window.fiaChatEvRestore = function (caseId, list) {
+    const sel = selOf(caseId); sel.clear();
+    const snaps = snapsOf(caseId); snaps.clear();
+    (typeof sanitizeChatEvidence === "function" ? sanitizeChatEvidence(list) : []).forEach(it => {
+        if (!it.msgKey) return;
+        sel.add(it.msgKey);
+        snaps.set(it.msgKey, it);
+    });
+    render(true);
+    refreshBtns();
+};
+
+// --- zdarzenia ---
+const listEl = $("verdictChatEvList");
+if (listEl) {
+    listEl.addEventListener("change", e => {
+        const cb = e.target && e.target.closest && e.target.closest('input[type="checkbox"]');
+        const inc = typeof verdictCaseFromForm === "function" ? verdictCaseFromForm() : null;
+        if (cb && inc) setPicked(inc.id, cb.dataset.key, cb.checked);
+    });
+    // Kliknięcie w wiersz (poza linkami, plikami i polem wyboru) też zaznacza / odznacza.
+    listEl.addEventListener("click", e => {
+        if (e.target.closest("a, button, video, img, input, .evidence-media-link")) return;
+        const row = e.target.closest(".chat-ev-item");
+        const inc = typeof verdictCaseFromForm === "function" ? verdictCaseFromForm() : null;
+        if (!row || !inc) return;
+        const key = row.dataset.key;
+        setPicked(inc.id, key, !selOf(inc.id).has(key));
+    });
+}
+const caseInput = $("caseId");
+if (caseInput) caseInput.addEventListener("input", () => render(false));
+
+const form = $("responseForm");
+if (form) {
+    // Po wysłaniu (albo zakolejkowaniu) werdyktu formularz jest czyszczony — wybór dla tej sprawy też.
+    form.addEventListener("reset", () => {
+        const inc = typeof verdictCaseFromForm === "function" ? verdictCaseFromForm() : null;
+        if (inc) { selByCase.delete(inc.id); snapByCase.delete(inc.id); }
+        setTimeout(() => { render(true); refreshBtns(); }, 0);
+    });
+}
+
+function wrapAfter(name, after) {
+    const orig = window[name];
+    if (typeof orig !== "function") return;
+    window[name] = function () {
+        const r = orig.apply(this, arguments);
+        try { after.apply(this, arguments); } catch (e) { console.error("[dowód z czatu] " + name, e); }
+        return r;
+    };
+}
+wrapAfter("transferToVerdictPanel", () => render(true));
+wrapAfter("transferAppealToVerdict", () => render(true));
+wrapAfter("renderAdminChatBox", () => render(false));
 })();
 </script>
 
