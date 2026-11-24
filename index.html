@@ -24699,6 +24699,19 @@ html[data-theme="light"] .fiax-svgbox,html[data-theme="graphite"] .fiax-svgbox{b
 /* narzędzie tylko dla stewardów */
 html:not(.fiax-staff) #fiaxFab,html:not(.fiax-staff) #fiaxHub,html:not(.fiax-staff) .fiax-pal,html:not(.fiax-staff) .fiax-emo,html:not(.fiax-staff) .fiax-emo-btn{display:none!important}
 
+/* przycisk „Analizuj werdykt” w tabeli zgłoszeń + karta analizy (tylko stewardzi) */
+html:not(.fiax-staff) .fiax-an-wrap{display:none!important}
+.fiax-an-wrap{margin-top:5px}
+.fiax-an-btn{clip-path:none!important;box-shadow:none!important;display:inline-flex!important;width:auto!important;align-items:center;gap:5px;background:rgba(255,215,0,.1)!important;color:var(--gold)!important;border:1px solid rgba(255,215,0,.55)!important;padding:2px 9px!important;font:700 10.5px var(--font-body)!important;letter-spacing:.6px;text-transform:uppercase;cursor:pointer;border-radius:3px!important;white-space:nowrap;margin:0!important}
+.fiax-an-btn:hover{background:var(--gold)!important;color:#1a1300!important}
+.fiax-an-li{display:flex!important;gap:7px;align-items:flex-start;font-size:13px;line-height:1.5;margin:5px 0;cursor:pointer;text-transform:none!important;letter-spacing:0!important;color:var(--text)!important;width:auto!important}
+.fiax-an-li input{margin:3px 0 0!important;flex:none;width:auto!important}
+.fiax-an-ln{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:4px 0;font-size:12.5px;overflow-wrap:anywhere}
+.fiax-an-ln a{color:#7db4ff}
+.fiax-an-st{border-top:1px solid var(--border);padding:6px 0;font-size:13px;line-height:1.55;overflow-wrap:anywhere}
+.fiax-an-hit td{background:rgba(255,215,0,.13)!important;font-weight:700}
+.fiax-hub .evidence-fetch-btn{display:inline-block;width:auto}
+
 </style>
 <style id="fiaxFonts">
 /* Dodatkowe czcionki (SIL Open Font License 1.1) z pakietów @fontsource — wbudowane, podłączone do selektora czcionek strony. */
@@ -39135,6 +39148,421 @@ self.onmessage = async function (e) {
         show(root) { list(root); },
         receive(root, id) { sel = id; q = ''; cat = -1; list(root); }
     });
+})();
+
+</script>
+<script>
+/* === ROZBUDOWA 134 — „Analiza werdyktu”: przycisk 🔍 w tabeli zgłoszeń (gdy oskarżony złożył już dowód) + karta z porównaniem dowodów stron, kontrolami spójności, precedensami i podpowiedzią rozstrzygnięcia — tylko dla stewardów === */
+(function () {
+    'use strict';
+    const F = window.FIAX; if (!F) return;
+    const { esc, L } = F;
+    const g = (fn, d) => F.safe(fn, d);
+    const URL_RE = /https?:\/\/[^\s<>"'`]+/gi;
+    const store = new Map();            // id sprawy -> stan ocen stewarda (tylko w pamięci strony)
+    let root = null, curId = null, last = null;
+    const $ = s => root && root.querySelector(s);
+
+    /* ---------------- rozpoznawanie dowodów ---------------- */
+    const VID_H = /(^|\.)(youtube\.com|youtu\.be|streamable\.com|twitch\.tv|medal\.tv|vimeo\.com|dailymotion\.com|tiktok\.com|kick\.com|rumble\.com|outplayed\.tv|plays\.tv|gamerdvr\.com)$/;
+    const IMG_H = /(^|\.)(imgur\.com|prnt\.sc|prntscr\.com|gyazo\.com|ibb\.co|postimg\.cc)$/;
+    const CLOUD_H = /(^|\.)(drive\.google\.com|docs\.google\.com|dropbox\.com|onedrive\.live\.com|1drv\.ms|mega\.nz|wetransfer\.com|we\.tl|mediafire\.com)$/;
+    function hostOf(u) { try { return new URL(u).hostname.toLowerCase().replace(/^www\./, ''); } catch (e) { return ''; } }
+    function kindOfUrl(u) {
+        let h = '', p = '';
+        try { const x = new URL(u); h = x.hostname.toLowerCase().replace(/^www\./, ''); p = x.pathname.toLowerCase(); } catch (e) { return 'other'; }
+        if (/\.(mp4|mov|webm|mkv|avi|m4v)$/.test(p)) return 'video';
+        if (/\.(png|jpe?g|gif|webp|bmp)$/.test(p)) return 'image';
+        if (VID_H.test(h)) return 'video';
+        if (IMG_H.test(h)) return 'image';
+        if (CLOUD_H.test(h)) return 'cloud';
+        return 'other';
+    }
+    function kindOfFile(f) {
+        const t = String(f.type || '').toLowerCase(), n = String(f.name || '').toLowerCase();
+        if (t.indexOf('video/') === 0 || /\.(mp4|mov|webm|mkv|avi|m4v)$/.test(n)) return 'video';
+        if (t.indexOf('image/') === 0 || /\.(png|jpe?g|gif|webp|bmp)$/.test(n)) return 'image';
+        return 'file';
+    }
+    const KIND_LBL = k => ({ video: L('wideo', 'video'), image: L('obraz', 'image'), cloud: L('dysk/chmura', 'cloud drive'), file: L('plik', 'file'), other: L('inny link', 'other link') }[k] || k);
+    function evOf(rec) {
+        const out = { links: [], files: [], note: '' };
+        if (!rec) return out;
+        const txt = String(rec.evidence || ''), seen = new Set();
+        (txt.match(URL_RE) || []).forEach(raw => {
+            const u = raw.replace(/[).,;\]]+$/, '');
+            if (seen.has(u)) return; seen.add(u);
+            out.links.push({ u, kind: kindOfUrl(u), host: hostOf(u) });
+        });
+        out.note = txt.replace(URL_RE, ' ').replace(/\s+/g, ' ').trim();
+        const f = rec.evidenceFiles;
+        const arr = Array.isArray(f) ? f : (f && typeof f === 'object' ? Object.values(f) : []);
+        arr.filter(Boolean).forEach(x => out.files.push({ key: String(x.key || ''), name: String(x.name || x.key || L('plik', 'file')), size: Number(x.size) || 0, type: String(x.type || ''), kind: kindOfFile(x) }));
+        return out;
+    }
+
+    // Słowa kluczowe w tekstach stron — to tylko sygnały pomocnicze (mogą się mylić), nie ocena.
+    const SIG = {
+        admit: /(moja wina|moj[ae]? b[łl][ąa]d|przyznaj[ęe] si[ęe]|przepraszam|\bsorry\b|my fault|my bad|i admit|i apolog|mea culpa)/i,
+        deny: /(nie jestem winn|nie by[łl][ea]m winn|nie moja wina|incydent wy[śs]cigowy|racing incident|not my fault|nie hamowa[łl]|nie zahamowa[łl]|didn'?t brake|did not brake|zmieni[łl]a? lini[ęe]|wjecha[łl]a? (we mnie|w moje)|he (braked|moved|turned|swerved))/i,
+        tech: /(\blag\w*|\bping\b|roz[łl][ąa]cz\w*|disconnect\w*|desync\w*|crash\w* gry|po[łl][ąa]czeni\w*|packet loss|connection)/i,
+        pointer: /(\b\d{1,2}:\d{2}(?::\d{2})?\b|okr[ąa][żz]eni\w*|\blap\s?\d+|\bL\d{1,2}\b|zakr[ęe]t\w*|\bT\d{1,2}\b|\bturn\s?\d+|sektor\w*|sector\s?\d)/i
+    };
+    const SIG_LBL = { admit: ['przyznanie się / przeprosiny', 'admission / apology'], deny: ['zaprzeczenie / „incydent wyścigowy”', 'denial / “racing incident”'], tech: ['powołanie się na lag / rozłączenie', 'lag / disconnect claim'], pointer: ['wskazanie czasu lub okrążenia w nagraniu', 'timestamp / lap reference'] };
+    const sigsOf = txt => Object.keys(SIG).filter(k => SIG[k].test(txt));
+
+    function sides(r) {
+        const by = g(() => caseStatementsByRole(r), { reporter: [], accused: [] });
+        const build = (mainRec, list, extraText) => {
+            const items = [];
+            if (mainRec) items.push({ main: true, ts: F.ts(mainRec), source: '', text: '', ev: evOf(mainRec) });
+            list.forEach(s => items.push({ main: false, ts: Number(s.ts) || 0, source: String(s.source || ''), text: String(s.text || '').trim(), ev: evOf(s) }));
+            const o = { items, links: [], files: [], texts: [] };
+            items.forEach(i => { o.links.push(...i.ev.links); o.files.push(...i.ev.files); if (i.text) o.texts.push(i.text); if (i.ev.note) o.texts.push(i.ev.note); });
+            if (extraText) o.texts.push(extraText);
+            o.n = o.links.length + o.files.length;
+            o.hasVideo = o.links.some(l => l.kind === 'video') || o.files.some(f => f.kind === 'video');
+            o.maybeVideo = !o.hasVideo && o.links.some(l => l.kind === 'cloud' || l.kind === 'other');
+            o.sig = sigsOf(o.texts.join(' \n '));
+            return o;
+        };
+        return { rep: build(r, by.reporter, String(r.details || '')), acc: build(null, by.accused, '') };
+    }
+    const accusedSubmitted = r => {
+        if (!r) return false;
+        const info = g(() => accusedEvidenceInfo(r), null);
+        if (info && info.state === 'submitted') return true;
+        const by = g(() => caseStatementsByRole(r), { accused: [] });
+        return by.accused.some(s => s && (String(s.text || '').trim() || evOf(s).links.length || evOf(s).files.length));
+    };
+    // canReview() w oryginale siedzi w zamkniętym module — dostępna jest tylko przez window.fia125 (jest też awaryjne sprawdzenie ról)
+    const canRev = () => g(() => {
+        const f = window.fia125;
+        if (f && typeof f.canReview === 'function') return !!f.canReview();
+        const me = loggedInSteward;
+        return !!me && (me.role === 'ROOT' || me.role === 'Główny Steward' || !!(me.permissions && me.permissions.review_incidents));
+    }, false);
+    const isWithdrawn = r => r && r.status === g(() => WITHDRAWN, 'Wycofane');
+
+    /* ---------------- kategorie i przepisy ---------------- */
+    function plCategory(cat) {
+        const cs = g(() => categoriesStructure, null);
+        if (!cs || !cs.en || !cs.pl || !cat) return cat || '';
+        const flat = o => [].concat(...Object.values(o));
+        const en = flat(cs.en), pl = flat(cs.pl), i = en.indexOf(cat);
+        return (i >= 0 && pl[i]) ? pl[i] : cat;
+    }
+    const sameCat = (r, e) => !!(e.app && r.category && plCategory(r.category).slice(0, 22) === e.app.slice(0, 22));
+    function matchRule(r, D) {
+        const c = F.norm(plCategory(r.category));
+        if (!c) return null;
+        let e = D.items.find(x => sameCat(r, x));
+        if (e) return e;
+        e = D.items.find(x => { const t = F.norm(x.title); return t && (c.includes(t) || t.includes(c)); });
+        if (e) return e;
+        const tok = c.split(/[^a-z0-9]+/).filter(w => w.length >= 5);
+        let best = null, bs = 0;
+        D.items.forEach(x => { const hay = F.norm(x.title + ' ' + (x.app || '')); const sc = tok.filter(w => hay.includes(w)).length; if (sc > bs) { bs = sc; best = x; } });
+        return bs >= 2 ? best : null;
+    }
+
+    /* ---------------- historia, precedensy ---------------- */
+    const isViol = d => !!(d && /^(naruszenie|violation)/i.test(String(d.decision || '').trim()) && !d.noOneGuilty);
+    const accusedGuilty = r => {
+        const d = r.decisionData; if (!isViol(d)) return false;
+        const gid = String(d.guiltyDiscordId || ''), aid = String(r.accusedDiscordId || '');
+        return !gid || !aid || gid === aid;
+    };
+    const sameUser = (idA, nickA, idB, nickB) => (idA && idB) ? String(idA) === String(idB) : (!!F.norm(nickA) && F.norm(nickA) === F.norm(nickB));
+    const median = a => a.length ? a.slice().sort((x, y) => x - y)[Math.floor(a.length / 2)] : 0;
+    function ladderIdx(rule, d) {
+        const secs = F.penSeconds(d.timePenalty), pts = F.points(d.pointsPenalty);
+        let best = -1, bs = 1e9;
+        rule.outs.forEach((o, i) => { if (o.decision !== d.decision) return; const sc = Math.abs(F.penSeconds(o.time) - secs) * 3 + Math.abs(F.points(o.points) - pts) * 5; if (sc < bs) { bs = sc; best = i; } });
+        return best;
+    }
+    const issuedAt = r => Number(r.decisionData && r.decisionData.issuedAt) || F.ts(r);
+
+    function analyze(id, ruleId) {
+        const all = F.incidents();
+        const r = all.find(x => x.id === id); if (!r) return null;
+        const D = F.data('rules') || { cats: [], items: [] };
+        const sd = sides(r);
+        const matched = !ruleId;
+        const rule = ruleId ? D.items.find(e => e.id === ruleId) || null : matchRule(r, D);
+        const others = all.filter(x => x.id !== r.id);
+
+        // precedensy w tej samej kategorii
+        const prec = rule && rule.app ? others.filter(x => sameCat(x, rule) && x.decisionData && x.decisionData.decision).sort((a, b) => issuedAt(b) - issuedAt(a)) : [];
+        const idxs = rule ? prec.map(x => ladderIdx(rule, x.decisionData)).filter(i => i >= 1) : [];
+        const last_ = rule ? rule.outs.length - 1 : 0;
+        const baseIdx = rule ? (idxs.length ? median(idxs) : Math.max(1, 1 + Math.floor((last_ - 1) / 2))) : 0;
+
+        // historia oskarżonego i zgłaszającego
+        const accAll = others.filter(x => sameUser(x.accusedDiscordId, x.accusedNick, r.accusedDiscordId, r.accusedNick));
+        const accViol = accAll.filter(accusedGuilty);
+        const acc = {
+            n: accAll.length, viol: accViol.length,
+            sameCatViol: rule && rule.app ? accViol.filter(x => sameCat(x, rule)).length : 0,
+            pts: accViol.reduce((s, x) => s + F.points(x.decisionData.pointsPenalty), 0),
+            list: accViol.sort((a, b) => issuedAt(b) - issuedAt(a)).slice(0, 5)
+        };
+        const repAll = others.filter(x => sameUser(x.discordId, x.nick, r.discordId, r.nick));
+        const rep = { n: repAll.length, rejected: repAll.filter(x => x.status === 'Odrzucone').length, cleared: repAll.filter(x => x.decisionData && /^(brak naruszenia|no violation)/i.test(String(x.decisionData.decision || ''))).length };
+        const pair = others.filter(x => (sameUser(x.discordId, x.nick, r.discordId, r.nick) && sameUser(x.accusedDiscordId, x.accusedNick, r.accusedDiscordId, r.accusedNick)) ||
+            (sameUser(x.discordId, x.nick, r.accusedDiscordId, r.accusedNick) && sameUser(x.accusedDiscordId, x.accusedNick, r.discordId, r.nick)));
+        const mutual = pair.filter(x => sameUser(x.discordId, x.nick, r.accusedDiscordId, r.accusedNick) && Math.abs(F.ts(x) - F.ts(r)) < 7 * 864e5);
+        const appeals = F.appeals().filter(a => String(a.caseId || a.incidentId || '') === r.id);
+
+        // kontrole spójności
+        const ck = [];
+        const add = (lvl, t) => ck.push({ lvl, t });
+        if (sd.rep.hasVideo) add('ok', L('Zgłaszający dołączył nagranie wideo.', 'The reporter attached a video.'));
+        else if (sd.rep.maybeVideo) add('info', L('Zgłaszający dał link/plik, ale nie wygląda na wideo — sprawdź, co to jest.', 'The reporter gave a link/file that does not look like video — check what it is.'));
+        else add('warn', L('Brak wideo po stronie zgłaszającego (' + (sd.rep.n ? 'są tylko inne załączniki' : 'brak załączników') + ').', 'No video on the reporter’s side (' + (sd.rep.n ? 'only other attachments' : 'no attachments') + ').'));
+        if (sd.acc.hasVideo) add('ok', L('Oskarżony dołączył nagranie wideo — porównaj oba ujęcia.', 'The accused attached a video — compare both viewpoints.'));
+        else if (sd.acc.n) add('info', L('Oskarżony dał dowód, ale nie wideo (' + sd.acc.links.concat(sd.acc.files).map(x => KIND_LBL(x.kind)).join(', ') + ').', 'The accused gave evidence, but not video (' + sd.acc.links.concat(sd.acc.files).map(x => KIND_LBL(x.kind)).join(', ') + ').'));
+        else add('info', L('Oskarżony złożył samo oświadczenie, bez linku i pliku.', 'The accused sent a statement only, with no link or file.'));
+        const repUrls = new Set(sd.rep.links.map(l => l.u)), shared = sd.acc.links.filter(l => repUrls.has(l.u));
+        if (shared.length) add('warn', L('Obie strony wskazują ten sam link — to ten sam materiał, nie dwa ujęcia.', 'Both sides point to the same link — one clip, not two viewpoints.'));
+        const info = g(() => accusedEvidenceInfo(r), null);
+        const accTs = sd.acc.items.map(i => i.ts).filter(Boolean);
+        if (info && info.deadline && accTs.length && Math.max(...accTs) > info.deadline + 60000) add('info', L('Oświadczenie oskarżonego przyszło po terminie (' + F.fmtDate(info.deadline) + ').', 'The accused’s statement arrived after the deadline (' + F.fmtDate(info.deadline) + ').'));
+        if (sd.acc.items.length > 1) add('info', L('Oskarżony złożył ' + sd.acc.items.length + ' oświadczenia — czytaj je po kolei.', 'The accused submitted ' + sd.acc.items.length + ' statements — read them in order.'));
+        if (sd.acc.sig.indexOf('tech') >= 0) add('warn', L('Oskarżony powołuje się na lag/rozłączenie — zweryfikuj w telemetrii lub replayu.', 'The accused cites lag/disconnect — verify in telemetry or the replay.'));
+        if (sd.acc.sig.indexOf('admit') >= 0) add('info', L('W tekście oskarżonego są słowa wskazujące na przyznanie się — sprawdź, czy to rzeczywiście przyznanie winy.', 'The accused’s text contains words suggesting an admission — check whether it really is one.'));
+        if (sd.acc.sig.indexOf('deny') >= 0) add('info', L('Oskarżony zaprzecza lub nazywa zdarzenie incydentem wyścigowym.', 'The accused denies it or calls it a racing incident.'));
+        if (sd.rep.n && sd.rep.sig.indexOf('pointer') < 0) add('info', L('Zgłoszenie nie wskazuje okrążenia ani czasu w nagraniu — poproś o moment zdarzenia.', 'The report gives no lap or timestamp in the clip — ask for the moment of the incident.'));
+        if (String(r.details || '').trim().length < 40) add('info', L('Opis zgłoszenia jest bardzo krótki.', 'The report description is very short.'));
+        if (mutual.length) add('warn', L('Wzajemne zgłoszenia w ciągu 7 dni: ' + mutual.map(x => x.id).join(', ') + ' — rozważ rozpatrzenie łącznie.', 'Cross-reports within 7 days: ' + mutual.map(x => x.id).join(', ') + ' — consider ruling on them together.'));
+        else if (pair.length) add('info', L('Ta para kierowców ma już ' + pair.length + ' inne zgłoszenia: ' + pair.slice(0, 5).map(x => x.id).join(', ') + ' (sprawdź, czy to nie spór/odwet).', 'This pair of drivers already has ' + pair.length + ' other reports: ' + pair.slice(0, 5).map(x => x.id).join(', ') + ' (check for a feud/retaliation).'));
+        if (r.decisionData && r.decisionData.decision) add('warn', L('Sprawa ma już werdykt („' + r.decisionData.decision + '”) — nowy go zastąpi.', 'The case already has a verdict (“' + r.decisionData.decision + '”) — a new one would replace it.'));
+        if (appeals.length) add('info', L('Do sprawy złożono apelację (' + appeals.length + ').', 'An appeal was filed on this case (' + appeals.length + ').'));
+        if (isWithdrawn(r)) add('warn', L('Kierowca wycofał to zgłoszenie.', 'The driver withdrew this report.'));
+        if (!/^\d{15,21}$/.test(String(r.accusedDiscordId || '').trim())) add('warn', L('Oskarżony nie ma poprawnego ID Discorda — werdykt nie trafi do niego w wiadomości.', 'The accused has no valid Discord ID — the verdict cannot reach them by DM.'));
+        if (r.assignedTo && r.assignedTo.nick && F.me() && r.assignedTo.id !== F.me().id) add('info', L('Sprawę prowadzi: ' + r.assignedTo.nick + '.', 'Case handled by: ' + r.assignedTo.nick + '.'));
+
+        // czynniki: z przepisu + wyliczone z danych (zaznaczone domyślnie, steward może odznaczyć)
+        const fac = [];
+        if (rule) {
+            rule.aggr.forEach((t, i) => fac.push({ k: 'a' + i, kind: 'aggr', t }));
+            rule.mitig.forEach((t, i) => fac.push({ k: 'm' + i, kind: 'mit', t }));
+        }
+        if (acc.sameCatViol > 0) fac.push({ k: 'ca', kind: 'aggr', pre: true, t: L('Recydywa: oskarżony miał już ' + acc.sameCatViol + ' naruszeń tej kategorii (z danych)', 'Repeat offence: the accused already has ' + acc.sameCatViol + ' violations in this category (from data)') });
+        if (acc.viol === 0) fac.push({ k: 'cm', kind: 'mit', pre: true, t: L('Oskarżony nie ma wcześniejszych naruszeń w bazie (z danych)', 'The accused has no earlier violations on record (from data)') });
+
+        return { r, D, rule, matched, sd, prec, idxs, baseIdx, acc, rep, pair, mutual, appeals, ck, fac, info };
+    }
+
+    /* ---------------- stan i podpowiedź ---------------- */
+    const st = id => { let s = store.get(id); if (!s) { s = { rule: null, assess: '', f: {}, c: {}, withText: false }; store.set(id, s); } return s; };
+    const facOn = (S, f) => (f.k in S.f) ? !!S.f[f.k] : !!f.pre;
+    function suggest(an, S) {
+        if (!an.rule || !an.rule.outs.length) return null;
+        const outs = an.rule.outs, last_ = outs.length - 1;
+        const nA = an.fac.filter(f => f.kind === 'aggr' && facOn(S, f)).length, nM = an.fac.filter(f => f.kind === 'mit' && facOn(S, f)).length;
+        const d = nA - nM, step = Math.sign(d) * Math.ceil(Math.abs(d) / 2);
+        const out = { nA, nM, step, base: an.baseIdx };
+        if (S.assess === 'refuted') return Object.assign(out, { lo: 0, hi: 0, why: L('Dowody obalają zarzut → brak naruszenia.', 'The evidence refutes the allegation → no violation.') });
+        if (S.assess === 'unclear') return Object.assign(out, { lo: 0, hi: Math.min(1, last_), why: L('Dowody są niejednoznaczne → brak podstaw do kary; rozważ prośbę o dodatkowe dowody albo pouczenie.', 'The evidence is inconclusive → no basis for a penalty; consider asking for more evidence or a warning.') });
+        const idx = Math.max(1, Math.min(last_, an.baseIdx + step));
+        const src = an.idxs.length ? L('mediana ' + an.idxs.length + ' dotychczasowych orzeczeń tej kategorii', 'median of ' + an.idxs.length + ' earlier rulings in this category') : L('brak precedensów — środek skali', 'no precedents — middle of the scale');
+        const why = L('Punkt wyjścia: ' + src + '; okoliczności obciążające ' + nA + ', łagodzące ' + nM + ' → przesunięcie o ' + (step > 0 ? '+' : '') + step + '.', 'Starting point: ' + src + '; aggravating ' + nA + ', mitigating ' + nM + ' → shift of ' + (step > 0 ? '+' : '') + step + '.');
+        return Object.assign(out, { lo: idx, hi: idx, why, typical: !S.assess });
+    }
+
+    /* ---------------- widok ---------------- */
+    const ul = a => a && a.length ? '<ul style="margin:4px 0 0 18px;padding:0;font-size:13px;line-height:1.6">' + a.map(x => '<li>' + esc(x) + '</li>').join('') + '</ul>' : '<div class="fiax-muted">—</div>';
+    const clip = (t, n) => t.length > n ? t.slice(0, n) + '…' : t;
+    const LVL = { ok: ['✅', 'green'], info: ['ℹ️', 'blue'], warn: ['⚠️', 'gold'] };
+
+    function evBlock(title, color, side, nick, isAcc) {
+        const links = side.links.map(l => '<div class="fiax-an-ln"><span class="fiax-pill ' + (l.kind === 'video' ? 'green' : l.kind === 'other' ? '' : 'blue') + '">' + esc(KIND_LBL(l.kind)) + '</span> <a href="' + esc(l.u) + '" target="_blank" rel="noopener noreferrer">' + esc(l.host || l.u) + '</a> <span class="fiax-muted">' + esc(clip(l.u.replace(/^https?:\/\/[^/]+/, ''), 60)) + '</span></div>').join('');
+        const files = side.files.map(f => '<div class="fiax-an-ln"><span class="fiax-pill ' + (f.kind === 'video' ? 'green' : 'blue') + '">' + esc(KIND_LBL(f.kind)) + '</span> ' + (f.key ? '<button type="button" class="fiax-btn sm ghost evidence-fetch-btn" data-key="' + esc(f.key) + '" data-name="' + esc(f.name) + '" data-type="' + esc(f.type) + '" data-size="' + f.size + '" data-kind="' + esc(f.kind) + '">▶ ' + esc(clip(f.name, 40)) + '</button>' : esc(f.name)) + (f.size ? ' <span class="fiax-muted">' + esc(F.kb(f.size)) + '</span>' : '') + '</div>').join('');
+        const stm = side.items.filter(i => i.text).map(i => '<div class="fiax-an-st"><div class="fiax-muted">📝 ' + esc(F.fmtDate(i.ts)) + (i.source ? ' · ' + esc(i.source) : '') + '</div><div>' + (i.text.length > 420 ? '<details><summary>' + esc(clip(i.text, 420)) + '</summary>' + esc(i.text) + '</details>' : esc(i.text)) + '</div></div>').join('');
+        const sig = side.sig.filter(k => k === 'pointer' || isAcc).map(k => '<span class="fiax-pill ' + (k === 'admit' ? 'gold' : k === 'tech' ? 'red' : '') + '">' + esc(L(SIG_LBL[k][0], SIG_LBL[k][1])) + '</span>').join(' ');
+        return '<div class="fiax-card" style="border-left:3px solid ' + color + '"><h3>' + esc(title) + (nick ? ' <span class="fiax-muted" style="text-transform:none;letter-spacing:0">— ' + esc(nick) + '</span>' : '') + '</h3>' +
+            '<div class="fiax-row tight"><span class="fiax-pill ' + (side.hasVideo ? 'green' : '') + '">' + esc(L('wideo: ', 'video: ')) + (side.hasVideo ? esc(L('tak', 'yes')) : esc(L('nie', 'no'))) + '</span><span class="fiax-pill">' + side.n + ' ' + esc(L('załączn.', 'attach.')) + '</span>' + (sig ? ' ' + sig : '') + '</div>' +
+            (links || files ? '<div style="margin:8px 0">' + links + files + '</div>' : '<div class="fiax-muted" style="margin:8px 0">' + esc(L('Brak linków i plików.', 'No links or files.')) + '</div>') +
+            (stm ? '<h3 style="margin-top:10px">' + esc(L('Oświadczenia i opisy', 'Statements and descriptions')) + '</h3>' + stm : '') + '</div>';
+    }
+
+    function mainHtml(an, S) {
+        const r = an.r, rule = an.rule, D = an.D;
+        const sel = '<select data-rule><option value=""' + (!rule ? ' selected' : '') + '>' + esc(L('— dopasuj automatycznie —', '— match automatically —')) + '</option>' + D.cats.map((c, ci) => '<optgroup label="' + esc(c) + '">' + D.items.filter(e => e.cat === ci).map(e => '<option value="' + e.id + '"' + ((S.rule || (rule && rule.id)) === e.id ? ' selected' : '') + '>' + esc(e.title) + '</option>').join('') + '</optgroup>').join('') + '</select>';
+        const kp = (b, s) => '<div class="fiax-kpi"><b>' + b + '</b><span>' + esc(s) + '</span></div>';
+        const head = '<div class="fiax-card"><div class="fiax-row" style="margin:0;align-items:center;justify-content:space-between"><div><h3 style="margin:0">' + esc(r.id) + ' · ' + esc(r.track || '') + (r.split ? ' (' + esc(r.split) + ')' : '') + ' · ' + esc(r.session || r.sessionType || '') + '</h3>' +
+            '<div class="fiax-muted" style="margin-top:4px">' + esc(L('Zgłaszający: ', 'Reporter: ')) + '<b>' + esc(r.nick || '—') + '</b> → ' + esc(L('oskarżony: ', 'accused: ')) + '<b>' + esc(r.accusedNick || '—') + '</b> · ' + esc(F.fmtDate(F.ts(r))) + ' · <span class="fiax-pill blue">' + esc(r.status || '') + '</span></div>' +
+            '<div style="margin-top:8px;font-size:13px;line-height:1.55">' + esc(clip(String(r.details || ''), 600)) + '</div></div>' +
+            '<div class="fiax-row tight" style="margin:0"><button type="button" class="fiax-btn sm gold" data-act="transfer">' + esc(L('Otwórz w panelu werdyktu', 'Open in verdict panel')) + '</button><button type="button" class="fiax-btn sm ghost" data-act="copy">' + esc(L('Kopiuj analizę', 'Copy analysis')) + '</button><button type="button" class="fiax-btn sm ghost" data-act="md">' + esc(L('Pobierz .md', 'Download .md')) + '</button></div></div></div>';
+        const kpis = '<div class="fiax-kpis">' + kp(an.sd.rep.n, L('dowody zgłaszającego', 'reporter evidence')) + kp(an.sd.acc.n, L('dowody oskarżonego', 'accused evidence')) + kp(an.acc.viol + '/' + an.acc.n, L('naruszenia / sprawy oskarżonego', 'violations / cases of accused')) + kp(an.prec.length, L('precedensy w kategorii', 'precedents in category')) + '</div>';
+        const ev = '<div class="fiax-grid fiax-g2">' + evBlock(L('Dowód zgłaszającego', 'Reporter’s evidence'), '#3b82f6', an.sd.rep, r.nick, false) + evBlock(L('Dowód oskarżonego', 'Accused’s evidence'), '#ef4444', an.sd.acc, r.accusedNick, true) + '</div>';
+        const ck = '<div class="fiax-card"><h3>' + esc(L('Kontrole spójności i sygnały', 'Consistency checks and signals')) + '</h3>' + an.ck.map(c => '<div class="fiax-an-li" style="cursor:default"><span>' + LVL[c.lvl][0] + '</span><span>' + esc(c.t) + '</span></div>').join('') +
+            '<div class="fiax-muted" style="margin-top:6px">' + esc(L('Sygnały z tekstu to dopasowanie słów kluczowych — nie zastępują obejrzenia nagrań.', 'Text signals are keyword matches — they do not replace watching the footage.')) + '</div></div>';
+        const rl = '<div class="fiax-card"><h3>' + esc(L('Przepis z biblioteki przewinień', 'Offence-library entry')) + '</h3><div class="fiax-row" style="margin-bottom:6px"><div class="fld" style="flex:1 1 320px"><label>' + esc(L('Wybrany przepis', 'Selected entry')) + (rule && an.matched ? ' (' + esc(L('dopasowany automatycznie', 'auto-matched')) + ')' : '') + '</label>' + sel + '</div></div>' +
+            (rule ? '<p style="margin:0 0 8px;font-size:13px;line-height:1.55"><b>' + esc(rule.title) + '</b> — ' + esc(rule.summary) + '</p>' +
+                '<div class="fiax-grid fiax-g2"><div><h3>' + esc(L('Co sprawdzić (lista kontrolna)', 'What to check (checklist)')) + '</h3>' + rule.check.map((t, i) => '<label class="fiax-an-li"><input type="checkbox" data-c="' + i + '"' + (S.c[i] ? ' checked' : '') + '><span>' + esc(t) + '</span></label>').join('') + '</div>' +
+                '<div><h3>' + esc(L('Pytania do stron', 'Questions to the parties')) + '</h3>' + ul(rule.ask) + '<h3 style="margin-top:10px">' + esc(L('Jakich dowodów żądać', 'Evidence to request')) + '</h3>' + ul(rule.ev) + '</div></div>'
+                : '<div class="fiax-note fiax-warn" style="margin:0">' + esc(L('Nie dopasowano przepisu do kategorii „' + (r.category || '—') + '”. Wybierz go z listy, aby zobaczyć listę kontrolną, czynniki i orientacyjne kary.', 'No entry matched the category “' + (r.category || '—') + '”. Pick one from the list to get the checklist, factors and indicative penalties.')) + '</div>') + '</div>';
+        const assess = '<div class="fiax-card"><h3>' + esc(L('Twoja ocena dowodów', 'Your assessment of the evidence')) + '</h3><div class="fiax-row tight" style="margin-bottom:8px">' +
+            [['confirmed', L('Potwierdzają zarzut', 'Confirm the allegation')], ['unclear', L('Niejednoznaczne', 'Inconclusive')], ['refuted', L('Obalają zarzut', 'Refute the allegation')]].map(a => '<label class="fiax-an-li" style="margin:0 14px 0 0"><input type="radio" name="fx-an-as" data-assess="' + a[0] + '"' + (S.assess === a[0] ? ' checked' : '') + '><span>' + esc(a[1]) + '</span></label>').join('') + '</div>' +
+            (an.fac.length ? '<div class="fiax-grid fiax-g2"><div><h3 style="color:#ff8a84">' + esc(L('Okoliczności obciążające', 'Aggravating factors')) + '</h3>' + an.fac.filter(f => f.kind === 'aggr').map(f => '<label class="fiax-an-li"><input type="checkbox" data-f="' + f.k + '"' + (facOn(S, f) ? ' checked' : '') + '><span>' + esc(f.t) + '</span></label>').join('') + '</div>' +
+                '<div><h3 style="color:#34d399">' + esc(L('Okoliczności łagodzące', 'Mitigating factors')) + '</h3>' + an.fac.filter(f => f.kind === 'mit').map(f => '<label class="fiax-an-li"><input type="checkbox" data-f="' + f.k + '"' + (facOn(S, f) ? ' checked' : '') + '><span>' + esc(f.t) + '</span></label>').join('') + '</div></div>' : '') + '</div>';
+        const sug = '<div class="fiax-card" data-sugg></div>';
+        const hist = '<div class="fiax-grid fiax-g2"><div class="fiax-card"><h3>' + esc(L('Precedensy w tej kategorii', 'Precedents in this category')) + '</h3>' +
+            (an.prec.length ? '<table class="fiax-tbl"><thead><tr><th>ID</th><th>' + esc(L('Data', 'Date')) + '</th><th>' + esc(L('Decyzja', 'Decision')) + '</th><th>' + esc(L('Kara', 'Penalty')) + '</th></tr></thead><tbody>' + an.prec.slice(0, 8).map(x => { const d = x.decisionData; return '<tr><td>' + esc(x.id) + '</td><td>' + esc(F.fmtDay(issuedAt(x))) + '</td><td>' + esc(d.decision) + '</td><td>' + esc([d.timePenalty, d.pointsPenalty].filter(Boolean).join(' / ') || '—') + '</td></tr>'; }).join('') + '</tbody></table>' + (an.prec.length > 8 ? '<div class="fiax-muted" style="margin-top:6px">' + esc(L('Pokazano 8 najnowszych z ' + an.prec.length + '.', 'Showing the 8 most recent of ' + an.prec.length + '.')) + '</div>' : '') : '<div class="fiax-muted">' + esc(rule && rule.app ? L('Brak wydanych werdyktów w tej kategorii.', 'No verdicts issued in this category yet.') : L('Ten przepis nie ma odpowiednika w kategoriach formularza — brak precedensów.', 'This entry has no matching report-form category — no precedents.')) + '</div>') + '</div>' +
+            '<div class="fiax-card"><h3>' + esc(L('Historia stron', 'History of the parties')) + '</h3>' +
+            '<div class="fiax-row tight"><span class="fiax-pill ' + (an.acc.viol ? 'red' : 'green') + '">' + esc(L('oskarżony: ', 'accused: ')) + an.acc.viol + ' ' + esc(L('naruszeń', 'violations')) + ' / ' + an.acc.n + ' ' + esc(L('spraw', 'cases')) + '</span>' + (an.acc.pts ? '<span class="fiax-pill gold">' + an.acc.pts + ' ' + esc(L('pkt karnych łącznie', 'penalty pts total')) + '</span>' : '') +
+            '<span class="fiax-pill">' + esc(L('zgłaszający: ', 'reporter: ')) + an.rep.n + ' ' + esc(L('innych zgłoszeń', 'other reports')) + (an.rep.n ? ', ' + an.rep.rejected + ' ' + esc(L('odrzuconych', 'rejected')) + ', ' + an.rep.cleared + ' ' + esc(L('bez naruszenia', 'no-violation')) : '') + '</span></div>' +
+            (an.acc.list.length ? '<table class="fiax-tbl" style="margin-top:8px"><tbody>' + an.acc.list.map(x => '<tr><td>' + esc(x.id) + '</td><td>' + esc(clip(x.category || '', 38)) + '</td><td>' + esc(x.decisionData.decision) + '</td></tr>').join('') + '</tbody></table>' : '') + '</div></div>';
+        return head + kpis + ev + ck + rl + assess + sug + hist;
+    }
+
+    function suggHtml(an, S) {
+        const rule = an.rule; if (!rule) return '<h3>' + esc(L('Orientacyjne rozstrzygnięcie', 'Indicative outcome')) + '</h3><div class="fiax-muted">' + esc(L('Wybierz przepis, aby zobaczyć podpowiedź.', 'Pick an entry to see the suggestion.')) + '</div>';
+        const sg = suggest(an, S);
+        const rows = rule.outs.map((o, i) => { const hit = sg && i >= sg.lo && i <= sg.hi; return '<tr class="' + (hit ? 'fiax-an-hit' : '') + '"><td>' + (hit ? '◀' : '') + '</td><td>' + esc(o.label) + '</td><td>' + esc(o.decision) + '</td><td>' + esc(o.time || '—') + '</td><td>' + esc(o.points || '—') + '</td></tr>'; }).join('');
+        const can = canRev();
+        return '<h3>' + esc(L('Orientacyjne rozstrzygnięcie (pomocnicze)', 'Indicative outcome (aid only)')) + '</h3>' +
+            '<table class="fiax-tbl"><thead><tr><th></th><th>' + esc(L('Sytuacja', 'Situation')) + '</th><th>' + esc(L('Decyzja', 'Decision')) + '</th><th>' + esc(L('Czas', 'Time')) + '</th><th>' + esc(L('Punkty', 'Points')) + '</th></tr></thead><tbody>' + rows + '</tbody></table>' +
+            '<div class="fiax-muted" style="margin:8px 0">' + esc(sg.why) + (sg.typical ? ' ' + esc(L('(Zaznacz ocenę dowodów, aby podpowiedź uwzględniła Twoją ocenę.)', '(Choose your assessment of the evidence to refine this.)')) : '') + '</div>' +
+            '<div class="fiax-row tight"><button type="button" class="fiax-btn" data-act="fill"' + (S.assess && can ? '' : ' disabled') + ' title="' + esc(S.assess ? (can ? '' : L('Brak uprawnień do rozpatrywania zgłoszeń.', 'No permission to review reports.')) : L('Najpierw wybierz ocenę dowodów.', 'Choose your assessment of the evidence first.')) + '">' + esc(L('Wypełnij formularz werdyktu', 'Fill in the verdict form')) + '</button>' +
+            '<label class="fiax-an-li" style="margin:0 0 0 8px"><input type="checkbox" data-withtext' + (S.withText ? ' checked' : '') + '><span>' + esc(L('Dopisz szkic uzasadnienia (okoliczności)', 'Append a reasoning draft (factors)')) + '</span></label></div>' +
+            '<div class="fiax-muted" style="margin-top:6px">' + esc(L('To podpowiedź z reguł i dotychczasowych orzeczeń, nie decyzja — nic nie jest zapisywane ani wysyłane; werdykt zatwierdzasz sam(a).', 'This is a suggestion from rules and past rulings, not a decision — nothing is saved or sent; you confirm the verdict yourself.')) + '</div>';
+    }
+
+    function renderSugg() { if (!last) return; const el = $('[data-sugg]'); if (el) el.innerHTML = suggHtml(last, st(last.r.id)); }
+    function renderAll() {
+        const out = $('[data-out]'); if (!out) return;
+        if (!curId) { out.innerHTML = ''; last = null; return; }
+        const S = st(curId), an = analyze(curId, S.rule);
+        if (!an) { out.innerHTML = '<div class="fiax-note fiax-warn">' + esc(L('Nie znaleziono sprawy ' + curId + '.', 'Case ' + curId + ' not found.')) + '</div>'; last = null; return; }
+        last = an; out.innerHTML = mainHtml(an, S); renderSugg();
+    }
+    function fillCases() {
+        const sel = $('[data-case]'); if (!sel) return;
+        const list = F.incidents().filter(r => !isWithdrawn(r) && accusedSubmitted(r)).sort((a, b) => F.ts(b) - F.ts(a));
+        if (curId && !list.find(r => r.id === curId)) { const c = F.incidents().find(r => r.id === curId); if (c) list.unshift(c); }
+        sel.innerHTML = '<option value="">' + esc(list.length ? L('— wybierz sprawę —', '— choose a case —') : L('Brak spraw z dowodem oskarżonego', 'No cases with accused evidence')) + '</option>' + list.map(r => '<option value="' + esc(r.id) + '"' + (r.id === curId ? ' selected' : '') + '>' + esc(r.id + ' — ' + (r.accusedNick || '?') + ' ← ' + (r.nick || '?') + ' · ' + (r.status || '')) + '</option>').join('');
+    }
+
+    /* ---------------- akcje ---------------- */
+    function draft(an, S, sg) {
+        const o = an.rule.outs[sg.lo];
+        const pick = kind => an.fac.filter(f => f.kind === kind && facOn(S, f)).map(f => f.t.replace(/\s*\((z danych|from data)\)\s*$/, ''));
+        const a = pick('aggr'), m = pick('mit');
+        return an.rule.title + ': ' + o.label + '.' + (a.length ? '\n' + L('Okoliczności obciążające: ', 'Aggravating: ') + a.join('; ') + '.' : '') + (m.length ? '\n' + L('Okoliczności łagodzące: ', 'Mitigating: ') + m.join('; ') + '.' : '');
+    }
+    function toText(an, S) {
+        const r = an.r, sg = suggest(an, S), n = [];
+        const asLbl = { confirmed: L('potwierdzają zarzut', 'confirm the allegation'), unclear: L('niejednoznaczne', 'inconclusive'), refuted: L('obalają zarzut', 'refute the allegation') }[S.assess] || L('(nie oceniono)', '(not assessed)');
+        n.push('# ' + L('Analiza werdyktu', 'Verdict analysis') + ' — ' + r.id, '', '- ' + L('Tor', 'Track') + ': ' + (r.track || '—') + ' (' + (r.split || '—') + '), ' + (r.session || r.sessionType || '—'), '- ' + L('Zgłaszający', 'Reporter') + ': ' + (r.nick || '—') + ' → ' + L('oskarżony', 'accused') + ': ' + (r.accusedNick || '—'), '- ' + L('Kategoria', 'Category') + ': ' + (r.category || '—'), '- ' + L('Status', 'Status') + ': ' + (r.status || '—'), '- ' + L('Przepis', 'Entry') + ': ' + (an.rule ? an.rule.title : '—'), '');
+        n.push('## ' + L('Dowody', 'Evidence'), '- ' + L('Zgłaszający', 'Reporter') + ': ' + an.sd.rep.n + ' (' + L('wideo: ', 'video: ') + (an.sd.rep.hasVideo ? L('tak', 'yes') : L('nie', 'no')) + ')', '- ' + L('Oskarżony', 'Accused') + ': ' + an.sd.acc.n + ' (' + L('wideo: ', 'video: ') + (an.sd.acc.hasVideo ? L('tak', 'yes') : L('nie', 'no')) + ')');
+        an.sd.rep.links.concat(an.sd.acc.links).forEach(l => n.push('  - ' + l.u));
+        n.push('', '## ' + L('Kontrole', 'Checks'));
+        an.ck.forEach(c => n.push('- [' + ({ ok: 'OK', info: 'i', warn: '!' }[c.lvl]) + '] ' + c.t));
+        if (an.rule) {
+            n.push('', '## ' + L('Lista kontrolna', 'Checklist'));
+            an.rule.check.forEach((t, i) => n.push('- [' + (S.c[i] ? 'x' : ' ') + '] ' + t));
+            n.push('', '## ' + L('Czynniki', 'Factors'));
+            an.fac.forEach(f => n.push('- [' + (facOn(S, f) ? 'x' : ' ') + '] ' + (f.kind === 'aggr' ? L('obciążająca', 'aggravating') : L('łagodząca', 'mitigating')) + ': ' + f.t));
+        }
+        n.push('', '## ' + L('Historia', 'History'), '- ' + L('Oskarżony', 'Accused') + ': ' + an.acc.viol + ' ' + L('naruszeń w', 'violations in') + ' ' + an.acc.n + ' ' + L('sprawach', 'cases') + ', ' + L('w tej kategorii', 'in this category') + ': ' + an.acc.sameCatViol, '- ' + L('Precedensy w kategorii', 'Precedents in category') + ': ' + an.prec.length);
+        n.push('', '## ' + L('Ocena i podpowiedź', 'Assessment and suggestion'), '- ' + L('Ocena dowodów', 'Assessment') + ': ' + asLbl);
+        if (sg) { const a = an.rule.outs[sg.lo], b = an.rule.outs[sg.hi]; n.push('- ' + L('Podpowiedź', 'Suggestion') + ': ' + a.label + ' — ' + a.decision + (a.time ? ', ' + a.time : '') + (a.points ? ', ' + a.points : '') + (sg.hi !== sg.lo ? ' … ' + b.label : ''), '- ' + sg.why); }
+        n.push('', '_' + L('Podpowiedź pomocnicza z reguł i dotychczasowych orzeczeń — decyzję podejmuje steward.', 'Aid generated from rules and past rulings — the steward makes the decision.') + '_');
+        return n.join('\n');
+    }
+    function fillForm(an, S) {
+        if (!canRev()) return F.toast(L('Brak uprawnień', 'No permission'), L('Nie masz uprawnień do rozpatrywania zgłoszeń.', 'You are not allowed to review reports.'));
+        const sg = suggest(an, S); if (!sg || !S.assess) return;
+        const o = an.rule.outs[sg.lo], r = an.r;
+        g(() => transferToVerdictPanel(r.id, r.accusedDiscordId || ''));
+        const dec = document.getElementById('decision');
+        if (!dec) return F.toast(L('Panel werdyktu niedostępny', 'Verdict panel unavailable'), L('Zaloguj się jako steward, aby wypełnić formularz werdyktu.', 'Log in as a steward to fill in the verdict form.'));
+        if ([...dec.options].some(x => x.value === o.decision)) dec.value = o.decision;
+        g(() => handleDecisionChange());
+        const t = document.getElementById('timePenalty'), p = document.getElementById('pointsPenalty'), det = document.getElementById('verdictDetails');
+        if (t) t.value = o.time || ''; if (p) p.value = o.points || '';
+        if (S.withText && det) { const line = draft(an, S, sg); det.value = det.value ? det.value.replace(/\s+$/, '') + '\n' + line : line; }
+        [dec, t, p, det].forEach(el => el && el.dispatchEvent(new Event('input', { bubbles: true })));
+        F.close(); g(() => showSection('adminSection'));
+        setTimeout(() => dec.scrollIntoView({ behavior: 'smooth', block: 'center' }), 200);
+        F.toast(L('Wypełniono formularz werdyktu', 'Verdict form filled in'), r.id + ' → ' + o.label);
+    }
+    function select(id) { curId = id || null; fillCases(); renderAll(); }
+
+    F.registerTab({
+        id: 'analyze', icon: '🔍', staff: true, title: ['Analiza werdyktu', 'Verdict analysis'],
+        sub: ['Porównanie dowodów stron, kontrole spójności, precedensy i podpowiedź kary dla sprawy z dowodem oskarżonego', 'Side-by-side evidence, consistency checks, precedents and a penalty suggestion for cases with accused evidence'],
+        mount(pane) {
+            root = pane;
+            pane.innerHTML = '<div class="fiax-note">' + esc(L('Narzędzie pomocnicze dla stewardów: porządkuje materiał i podpowiada rozstrzygnięcie na podstawie reguł oraz dotychczasowych orzeczeń. Nie ogląda nagrań i nie zastępuje decyzji sędziego. Nic nie jest zapisywane w bazie ani wysyłane.', 'A steward aid: it organises the material and suggests an outcome from rules and past rulings. It does not watch footage and does not replace the judge’s decision. Nothing is written to the database or sent.')) + '</div>' +
+                '<div class="fiax-row"><div class="fld" style="flex:1 1 360px"><label>' + esc(L('Sprawa (z dowodem oskarżonego)', 'Case (with accused evidence)')) + '</label><select data-case></select></div><button type="button" class="fiax-btn ghost sm" data-act="refresh">' + esc(L('Odśwież listę', 'Refresh list')) + '</button></div><div data-out></div>';
+            pane.addEventListener('change', e => {
+                const t = e.target;
+                if (t.matches('[data-case]')) return select(t.value);
+                if (!curId) return;
+                const S = st(curId);
+                if (t.matches('[data-rule]')) { S.rule = t.value || null; S.f = {}; S.c = {}; return renderAll(); }
+                if (t.matches('[data-assess]')) { S.assess = t.dataset.assess; return renderSugg(); }
+                if (t.matches('[data-f]')) { S.f[t.dataset.f] = t.checked; return renderSugg(); }
+                if (t.matches('[data-c]')) { S.c[t.dataset.c] = t.checked; return; }
+                if (t.matches('[data-withtext]')) { S.withText = t.checked; }
+            });
+            pane.addEventListener('click', e => {
+                const b = e.target.closest('[data-act]'); if (!b || b.disabled) return;
+                const a = b.dataset.act;
+                if (a === 'refresh') return fillCases();
+                if (!last) return;
+                const S = st(last.r.id);
+                if (a === 'copy') return F.copy(toText(last, S));
+                if (a === 'md') return F.download(toText(last, S), 'analiza-' + F.slug(last.r.id) + '.md', 'text/markdown;charset=utf-8');
+                if (a === 'fill') return fillForm(last, S);
+                if (a === 'transfer') {
+                    if (!canRev()) return F.toast(L('Brak uprawnień', 'No permission'), L('Nie masz uprawnień do rozpatrywania zgłoszeń.', 'You are not allowed to review reports.'));
+                    g(() => transferToVerdictPanel(last.r.id, last.r.accusedDiscordId || '')); F.close(); g(() => showSection('adminSection'));
+                }
+            });
+            fillCases(); renderAll();
+        },
+        show() { fillCases(); if (curId) renderAll(); },
+        receive(pane, payload) { if (payload && payload.id) select(payload.id); }
+    });
+
+    /* ---------------- przycisk w tabeli zgłoszeń ---------------- */
+    const WRAP = 'fiax-an-wrap';
+    function inject() {
+        const tb = document.getElementById('adminTableBody'); if (!tb) return;
+        const staff = F.isStaff();
+        if (!staff) { tb.querySelectorAll('.' + WRAP).forEach(x => x.remove()); return; }
+        const byId = new Map(F.incidents().map(x => [x.id, x]));
+        const label = L('🔍 Analizuj werdykt', '🔍 Analyze verdict');
+        tb.querySelectorAll('.admin-row-cb').forEach(cb => {
+            const tr = cb.closest('tr'), cell = tr && tr.children[1]; if (!cell) return;
+            const r = byId.get(cb.dataset.id), ex = cell.querySelector('.' + WRAP);
+            if (!r || isWithdrawn(r) || !accusedSubmitted(r)) { if (ex) ex.remove(); return; }
+            if (ex) { const b = ex.firstChild; if (b && b.textContent !== label) b.textContent = label; return; }
+            const d = document.createElement('div'); d.className = WRAP;
+            d.innerHTML = '<button type="button" class="fiax-an-btn" data-an-id="' + esc(r.id) + '" title="' + esc(L('Oskarżony złożył dowód — porównaj dowody stron, sprawdź precedensy i przygotuj werdykt', 'The accused has submitted evidence — compare both sides, check precedents and prepare the verdict')) + '">' + esc(label) + '</button>';
+            cell.appendChild(d);
+        });
+    }
+    let mo = null, moEl = null;
+    const deb = F.debounce(inject, 60);
+    function ensureObserver() {
+        const tb = document.getElementById('adminTableBody'); if (!tb || tb === moEl) return;
+        if (mo) mo.disconnect();
+        moEl = tb; mo = new MutationObserver(deb); mo.observe(tb, { childList: true, subtree: true });
+        inject();
+    }
+    document.addEventListener('click', e => {
+        const b = e.target.closest && e.target.closest('.fiax-an-btn'); if (!b) return;
+        e.preventDefault(); e.stopPropagation();
+        if (F.isStaff()) F.openWith('analyze', { id: b.dataset.anId });
+    }, true);
+    setInterval(() => { try { ensureObserver(); inject(); } catch (e) { /* ignoruj — kolejne przejście spróbuje ponownie */ } }, 1500);
+    ensureObserver();
 })();
 
 </script>
