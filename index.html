@@ -24696,6 +24696,9 @@ html[data-theme="light"] .fiax-svgbox,html[data-theme="graphite"] .fiax-svgbox{b
 .fiax-row>select,.fiax-row>input[type=text],.fiax-row>input[type=search]{width:auto;flex:0 1 auto}
 .fiax-row>input[type=search]{flex:1 1 220px}
 
+/* narzędzie tylko dla stewardów */
+html:not(.fiax-staff) #fiaxFab,html:not(.fiax-staff) #fiaxHub,html:not(.fiax-staff) .fiax-pal,html:not(.fiax-staff) .fiax-emo,html:not(.fiax-staff) .fiax-emo-btn{display:none!important}
+
 </style>
 <style id="fiaxFonts">
 /* Dodatkowe czcionki (SIL Open Font License 1.1) z pakietów @fontsource — wbudowane, podłączone do selektora czcionek strony. */
@@ -37997,14 +38000,15 @@ function findAlignmentPattern(matrix, alignmentPatternQuads, topRight, topLeft, 
     let hub, navEl, bodyEl, titleEl, subEl, current = null;
     const panes = {};
 
-    function visibleTabs() { return FIAX.tabs.filter(t => !t.staff || FIAX.isStaff()); }
+    // Całe narzędzie jest tylko dla stewardów (isAdminAuthenticated). Zwykli członkowie ligi nie widzą przycisku, kart, palety ani emoji.
+    function visibleTabs() { return FIAX.isStaff() ? FIAX.tabs : []; }
     function renderNav() {
         navEl.innerHTML = '<h4>FIA+ ' + FIAX.L('Narzędzia', 'Toolkit') + '</h4>' + visibleTabs().map(t =>
             '<button type="button" data-fx-tab="' + t.id + '" class="' + (current === t.id ? 'on' : '') + '"><span class="ic">' + t.icon + '</span>' + FIAX.esc(FIAX.L(t.title[0], t.title[1])) + '</button>').join('') +
             '<div class="fiax-ver">v' + FIAX.version + ' · ' + FIAX.L('dane nie opuszczają przeglądarki', 'data never leaves your browser') + '<br><kbd class="fiax-kbd-k">Ctrl</kbd>+<kbd class="fiax-kbd-k">.</kbd> ' + FIAX.L('— paleta poleceń', '— command palette') + '</div>';
     }
     FIAX.open = function (id) {
-        if (!hub) return;
+        if (!hub || !FIAX.isStaff()) return;
         const vis = visibleTabs();
         let tab = vis.find(t => t.id === id) || vis.find(t => t.id === current) || vis[0];
         if (!tab) return;
@@ -38052,6 +38056,19 @@ function findAlignmentPattern(matrix, alignmentPatternQuads, topRight, topLeft, 
         document.addEventListener('keydown', e => { if (e.key === 'Escape' && FIAX.isOpen() && !document.querySelector('.fiax-pal.open')) FIAX.close(); });
     }
     if (document.body) init(); else document.addEventListener('DOMContentLoaded', init);
+    // Stan „steward” bywa zmieniany bez zdarzeń (logowanie/wylogowanie), więc sprawdzamy go cyklicznie i ustawiamy klasę na <html>;
+    // CSS (html:not(.fiax-staff) …) chowa przycisk, okno narzędzi, paletę i przyciski emoji dla wszystkich pozostałych.
+    function syncStaff() {
+        const on = FIAX.isStaff();
+        if (document.documentElement.classList.contains('fiax-staff') !== on) {
+            document.documentElement.classList.toggle('fiax-staff', on);
+            if (!on) { try { FIAX.close(); const p = document.querySelector('.fiax-pal.open'); if (p) p.classList.remove('open'); const e = document.querySelector('.fiax-emo.open'); if (e) e.classList.remove('open'); } catch (x) {} }
+            else renderNav();
+            document.dispatchEvent(new CustomEvent('fiax-staff-change', { detail: on }));
+        }
+    }
+    syncStaff(); setInterval(syncStaff, 700);
+
 
     /* ---------- małe elementy wielokrotnego użytku ---------- */
     FIAX.kpi = (value, label) => '<div class="fiax-kpi"><b' + (String(value).length > 9 ? ' class="long"' : '') + '>' + FIAX.esc(value) + '</b><span>' + FIAX.esc(label) + '</span></div>';
@@ -40016,6 +40033,7 @@ self.onmessage = async function (e) {
         const s = listEl.querySelector('.sel'); if (s) s.scrollIntoView({ block: 'nearest' });
     }
     function open() {
+        if (!F.isStaff()) return;
         if (!pal) create();
         built = false; build(); pal.classList.add('open'); input.value = ''; sel = 0; render(); input.focus();
         if (!window.Fuse) F.loadLib('fuse').then(() => { if (pal.classList.contains('open')) { build(); render(); } }).catch(() => {});
@@ -40038,7 +40056,7 @@ self.onmessage = async function (e) {
         });
     }
     document.addEventListener('keydown', e => {
-        if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && (e.key === '.' || e.code === 'Period')) { e.preventDefault(); pal && pal.classList.contains('open') ? close() : open(); }
+        if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && (e.key === '.' || e.code === 'Period')) { if (!F.isStaff()) return; e.preventDefault(); pal && pal.classList.contains('open') ? close() : open(); }
     });
     F.palette_open = open;
 })();
@@ -40111,6 +40129,7 @@ self.onmessage = async function (e) {
         document.addEventListener('keydown', e => { if (e.key === 'Escape' && pop.classList.contains('open')) pop.classList.remove('open'); });
     }
     function openFor(btn, el) {
+        if (!F.isStaff()) return;
         if (!pop) create();
         target = el; search.value = '';
         const rec = store.get('fiax_emoji_recent', []); renderCat(rec.length ? 0 : 1);
@@ -40150,15 +40169,21 @@ self.onmessage = async function (e) {
         bebas:      ['BEBAS NEUE',       "'Bebas Neue', sans-serif",          "'Roboto Condensed', sans-serif"],
         audiowide:  ['AUDIOWIDE',        "'Audiowide', sans-serif",           "'Exo 2', sans-serif"]
     };
+    const F = window.FIAX;
+    const staff = () => !!(F && F.isStaff && F.isStaff());
+    // Presety zostają zarejestrowane zawsze (jeśli steward ustawi czcionkę globalnie, wszyscy ją zobaczą), ale pozycje w selektorze „CZCIONKA” widzą tylko stewardzi.
     function apply() {
         try {
             if (typeof FONT_PRESETS === 'undefined') return;
             Object.keys(EXTRA).forEach(k => { if (!FONT_PRESETS[k]) FONT_PRESETS[k] = { heading: EXTRA[k][1], body: EXTRA[k][2] }; });
             const sel = document.getElementById('fontSelect');
-            if (sel) Object.keys(EXTRA).forEach(k => {
-                if ([...sel.options].some(o => o.value === k)) return;
-                const o = document.createElement('option'); o.value = k; o.textContent = 'CZCIONKA: ' + EXTRA[k][0]; sel.appendChild(o);
-            });
+            if (sel) {
+                if (staff()) Object.keys(EXTRA).forEach(k => {
+                    if ([...sel.options].some(o => o.value === k)) return;
+                    const o = document.createElement('option'); o.value = k; o.dataset.fiax = '1'; o.textContent = 'CZCIONKA: ' + EXTRA[k][0]; sel.appendChild(o);
+                });
+                else [...sel.options].forEach(o => { if (o.dataset.fiax === '1' && o.value !== sel.value) o.remove(); });
+            }
             // jeśli zapisana czcionka pochodzi z tego zestawu, a strona zdążyła ustawić „default” — przywróć wybór
             const saved = localStorage.getItem('siteFont');
             if (saved && EXTRA[saved] && typeof applyFont === 'function' && !document.documentElement.style.getPropertyValue('--font-heading').includes(EXTRA[saved][1].split(',')[0])) applyFont(saved);
@@ -40166,6 +40191,7 @@ self.onmessage = async function (e) {
     }
     apply();
     window.addEventListener('load', apply);
+    document.addEventListener('fiax-staff-change', apply);
 })();
 
 </script>
