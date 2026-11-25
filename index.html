@@ -10756,6 +10756,23 @@ function resetAppealIDCounter() {
 // Wspólna dla pierwszego wysłania (publishVerdict) i dla „🔁 Wyślij ponownie” (resendVerdict),
 // żeby ponowna wysyłka wyglądała dokładnie tak samo jak oryginał. Zwraca { blob, filename } albo null.
 async function renderVerdictPngForDiscord(reportForPng, caseId) {
+    const filename = `FIA_WERDYKT_${String(caseId).replace(/[^a-zA-Z0-9_-]/g, "_")}.png`;
+    // 1) nowa szeroka grafika (ta sama co przy „Pobierz PNG werdyktu”)
+    let timer = null;
+    try {
+        if (window.FIAX && window.FIAX.verdictImageForDiscord && reportForPng && reportForPng.decisionData) {
+            const blob = await Promise.race([
+                window.FIAX.verdictImageForDiscord(reportForPng),
+                new Promise((_, rej) => { timer = setTimeout(() => rej(new Error("przekroczony czas renderowania")), 20000); })
+            ]);
+            if (blob) return { blob, filename };
+        }
+    } catch (err) {
+        console.warn("Nowa grafika werdyktu nie powstała — wysyłam dotychczasową kartę:", err);
+    } finally {
+        clearTimeout(timer);
+    }
+    // 2) zapas: dotychczasowa karta
     try {
         if (typeof html2canvas === "undefined") return null;
         const pngHolder = document.getElementById("verdictPngTemplate");
@@ -10764,7 +10781,7 @@ async function renderVerdictPngForDiscord(reportForPng, caseId) {
             const canvas = await html2canvas(pngHolder.firstElementChild, { backgroundColor: "#04050a", scale: 2, useCORS: true });
             const blob = await new Promise(resolve => canvas.toBlob(resolve, "image/png"));
             if (!blob) return null;
-            return { blob, filename: `FIA_WERDYKT_${String(caseId).replace(/[^a-zA-Z0-9_-]/g, "_")}.png` };
+            return { blob, filename };
         } finally {
             pngHolder.innerHTML = "";
         }
@@ -38605,7 +38622,7 @@ function findAlignmentPattern(matrix, alignmentPatternQuads, topRight, topLeft, 
         doc.save('fia-werdykt-' + F.slug(r.id) + '.pdf');
     }
 
-    /* ---------- PNG: osobna grafika (efektowna ciemna karta, bez kodu QR), rysowana na canvas — zawsze jeden plik, wysokość dopasowana do treści ---------- */
+    /* ---------- PNG: osobna grafika (szeroka, 16:9, bez kodu QR), rysowana na canvas — zawsze jeden plik; wyższy tylko wtedy, gdy treść nie mieści się na ekranie ---------- */
     let pngFontP = null;
     function pngFonts() {
         if (!pngFontP) pngFontP = Promise.all(['regular', 'bold'].map(w => {
@@ -38616,7 +38633,7 @@ function findAlignmentPattern(matrix, alignmentPatternQuads, topRight, topLeft, 
     }
 
     function paintVerdict(g, r, d, W, H, k) {
-        const P = 56, CW = W - 2 * P;
+        const P = 52;
         const pts = F.points(d.pointsPenalty), secs = F.penSeconds(d.timePenalty);
         const hasTime = !/^\s*(brak|none|-|—|0\s*s?)?\s*$/i.test(d.timePenalty || '');
         const penalised = !d.noOneGuilty && (pts > 0 || secs > 0 || hasTime || totalPoints(d) > 0);
@@ -38681,7 +38698,111 @@ function findAlignmentPattern(matrix, alignmentPatternQuads, topRight, topLeft, 
 
         g.textBaseline = 'alphabetic';
 
-        /* --- tło: gradient, włókno węglowe, poświaty, linie prędkości --- */
+        /* ===== 1. pomiary (wysokość wynika tylko z treści) ===== */
+        const TOP = 40, FOOT = 96, GAP = 16, SCREEN_H = Math.round(W * 9 / 16), SCREEN_B = SCREEN_H - FOOT;
+        const LW = Math.round(996 + (W - 1920) * 0.4), X2 = P + LW + 36, RW = W - 44 - X2;
+
+        // lewa kolumna
+        const trackF = fit(r.track || '—', 40, 26, LW - 80, 2, true, true);
+        const trackY = 276, trackH = trackF.h + 28;
+        let cx = P;
+        const chips = [r.split, r.sessionType].filter(Boolean).map((s, i) => {
+            const f = fit(s, 23, 16, LW / 2 - 60, 2, true);
+            font(f.fs, true); const w = Math.max(...f.lines.map(l => g.measureText(l).width)) + 48;
+            const c = { f, w, x: cx, i }; cx += w + 14; return c;
+        });
+        const chipH = Math.max(0, ...chips.map(c => c.f.h + 20));
+        let heroY = trackY + trackH + 14 + chipH + 20;
+        const full = d.noOneGuilty ? L('Brak winnego', 'No one guilty') : String(d.guiltyNick || '—').trim();
+        const parts = full.split(/\s+/);
+        const big = !d.noOneGuilty && parts.length > 1 ? parts[parts.length - 1] : full;
+        const small = !d.noOneGuilty && parts.length > 1 ? parts.slice(0, -1).join(' ') : '';
+        const tag = L('Winny', 'Guilty').toUpperCase();
+        font(23, true, true); const tagW = g.measureText(tag).width + 66;
+        const smallF = small ? fit(small, 48, 24, LW - tagW - 40, 2, false, true) : null;
+        const headH = Math.max(46, smallF ? smallF.h : 0);
+        let nameF = fit(big, 158, 70, LW - 30, 1, true, true);
+        if (nameF.lines.length > 1) nameF = fit(big, 90, 44, LW - 30, 3, true, true);
+        let penY = heroY + headH + 8 + nameF.h + 40;
+
+        const ptsStr = String(d.pointsPenalty || '0 pkt').trim(), m = ptsStr.match(/^([+-]?\d+(?:[.,]\d+)?)\s*(.*)$/);
+        const pw = Math.round(LW * 0.562), tw = LW - pw - 20;
+        const pFit = m ? null : fit(ptsStr, 76, 26, pw - 70, 5, true, true);
+        const timeStr = d.timePenalty || L('brak', 'none');
+        const tFit = fit(timeStr, 108, 28, tw - 52, 4, true, true);
+        const penMin = Math.max(240, tFit.h + 160, pFit ? pFit.h + 110 : 0);
+
+        // prawa kolumna
+        const df = fit(d.decision || '—', 40, 25, RW - 60, 3, true, true);
+        const decH = df.h + 78;
+        const ex = extras(d).map((x, i) => {
+            const f = fit(x.decision + ' — ' + (x.timePenalty || L('brak', 'none')) + ', ' + (x.pointsPenalty || '0 pkt'), 23, 18, RW - 66, 5, true);
+            return { f, h: f.h + 52, title: L('Dodatkowa decyzja ', 'Extra decision ') + (i + 1) };
+        });
+        // własne rubryki z formularza werdyktu („Dodatkowe informacje”)
+        const custom = typeof verdictCustomLines === 'function' ? verdictCustomLines(d) : [];
+        if (custom.length) {
+            const f = fit(custom.map(x => x.label + ': ' + x.text).join('\n'), 22, 17, RW - 66, 14, true);
+            ex.push({ f, h: f.h + 52, title: L('Dodatkowe informacje', 'Additional information') });
+        }
+        const half = (RW - GAP) / 2;
+        const who = [[L('Oskarżony', 'Accused'), r.accusedNick || '—', true], [L('Zgłaszający', 'Reporter'), r.nick || '—', false]]
+            .map(a => { let f = fit(a[1], 28, 22, half - 116, 1, true); if (f.lines.length > 1) f = fit(a[1], 24, 18, half - 116, 3, true); return { title: a[0], name: a[1], hot: a[2], f }; });
+        const whoH = Math.max(104, ...who.map(a => a.f.h + 66));
+        const catF = fit(r.category || '—', 26, 20, RW - 60, 6, true);
+        const catH = catF.h + 70;
+        const timeH = 110;
+
+        // sędzia + zatwierdzający w jednym panelu
+        const judgeW = 262, apprW = RW - judgeW - 24;
+        const judgeF = fit(d.judge || '—', 24, 16, judgeW - 104, 3, true);
+        const apprNames = approved(d) ? (Array.isArray(d.approvedBy) ? d.approvedBy : Object.values(d.approvedBy)).map(a => a && a.nick).filter(Boolean) : [];
+        const items = []; let px = 0, row = 0;
+        apprNames.forEach(n => {
+            const f = fit(n, 24, 16, apprW - 110, 2, true);
+            font(f.fs, true); const w = Math.max(...f.lines.map(l => g.measureText(l).width)) + 84;
+            if (px && px + w > apprW - 12) { px = 0; row++; }
+            items.push({ n, f, w, px, row }); px += w + 10;
+        });
+        const rowsH = []; items.forEach(it => { rowsH[it.row] = Math.max(rowsH[it.row] || 52, it.f.h + 18); });
+        const offH = 56 + Math.max(Math.max(52, judgeF.h + 18), rowsH.reduce((a, b) => a + b + 8, -8)) + 16;
+
+        const fixed = [decH].concat(ex.map(e => e.h), [whoH, catH, timeH, offH]);
+        const fixedSum = fixed.reduce((a, b) => a + b, 0);
+
+        // uzasadnienie: najpierw w prawej kolumnie (czcionka 25 → 18), a gdy się nie mieści — szeroki panel pod spodem w 2 kolumnach
+        const rawParas = String(d.verdictDetails || L('(brak uzasadnienia)', '(no reasoning)')).split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+        const layoutParas = (fs, width) => { font(fs, false); return rawParas.map(s => wrap(s, width)); };
+        const lineH = fs => Math.round(fs * 1.38);
+        const avail = SCREEN_B - TOP - fixedSum - fixed.length * GAP;
+        let rs = null;
+        for (let fs = 25; fs >= 18; fs--) {
+            const paras = layoutParas(fs, RW - 96);
+            const h = 74 + paras.reduce((a, p) => a + p.length * lineH(fs) + 8, 0) + 8;
+            if (h <= avail) { rs = { fs, paras }; break; }
+        }
+        const rightNeed = TOP + fixedSum + (fixed.length - 1) * GAP + (rs ? GAP + avail : 0);
+        const mainB = Math.max(SCREEN_B, penY + penMin, rightNeed);
+
+        let wide = null;
+        if (!rs) {
+            const fs = 22, colW = (W - 44 - P - 40) / 2, lh = lineH(fs);
+            const flat = [];
+            layoutParas(fs, colW - 70).forEach(p => p.forEach((l, i) => flat.push({ l, first: i === 0, h: lh + (i === p.length - 1 ? 12 : 0) })));
+            const total = flat.reduce((a, b) => a + b.h, 0);
+            let acc = 0, cut = 0;
+            while (cut < flat.length && acc + flat[cut].h / 2 <= total / 2) acc += flat[cut++].h;
+            const cols = [flat.slice(0, cut), flat.slice(cut)];
+            wide = { fs, lh, colW, cols, h: 100 + Math.max(...cols.map(c => c.reduce((a, b) => a + b.h, 0))) + 10 };
+        }
+        const contentB = mainB + (wide ? 20 + wide.h : 0);
+        const totalH = contentB + FOOT;
+
+        // przy większym płótnie lewa kolumna rozkłada nadmiar wysokości, żeby kafle kar nie robiły się zbyt wysokie
+        const lift = Math.round(Math.max(0, mainB - penY - 380) / 3);
+        heroY += lift; penY += 2 * lift;
+
+        /* ===== 2. tło ===== */
         rect(0, 0, W, H, grad(0, 0, 0, H, ['#0b0c14', '#10121d', '#06070b']));
         const tile = document.createElement('canvas'); tile.width = tile.height = 12;
         const t = tile.getContext('2d');
@@ -38689,236 +38810,223 @@ function findAlignmentPattern(matrix, alignmentPatternQuads, topRight, topLeft, 
         t.fillStyle = 'rgba(0,0,0,0.30)'; t.fillRect(6, 0, 6, 6); t.fillRect(0, 6, 6, 6);
         rect(0, 0, W, H, g.createPattern(tile, 'repeat'));
         const orb = (x, y, rad, a) => { const gr = g.createRadialGradient(x, y, 0, x, y, rad); gr.addColorStop(0, 'rgba(' + C.rgb + ',' + a + ')'); gr.addColorStop(1, 'rgba(' + C.rgb + ',0)'); rect(x - rad, y - rad, 2 * rad, 2 * rad, gr); };
-        orb(W, 40, 760, 0.42); orb(0, 800, 620, 0.22); orb(W, H - 380, 640, 0.15);
-        for (let i = 0; i < 16; i++) {
-            const yy = 100 + i * 21, x0 = 430 + (i * 173) % 420;
-            path([[x0, yy], [W, yy - (W - x0) * 0.14], [W, yy - (W - x0) * 0.14 + (i % 3 ? 1.5 : 4)], [x0, yy + 1]]);
-            fill(grad(x0, 0, W, 0, ['rgba(255,255,255,0)', 'rgba(255,255,255,' + (i % 3 ? 0.10 : 0.06) + ')']));
+        orb(1000, 0, 720, 0.36); orb(0, 640, 760, 0.26); orb(W, H, 720, 0.20);
+        for (let i = 0; i < 14; i++) {
+            const yy = 96 + i * 19, x0 = 560 + (i * 173) % 330, x9 = X2 - 20;
+            path([[x0, yy], [x9, yy - (x9 - x0) * 0.14], [x9, yy - (x9 - x0) * 0.14 + (i % 3 ? 1.5 : 4)], [x0, yy + 1]]);
+            fill(grad(x0, 0, x9, 0, ['rgba(255,255,255,0)', 'rgba(255,255,255,' + (i % 3 ? 0.10 : 0.06) + ')']));
         }
-        rect(0, 0, 10, H, grad(0, 0, 0, H, [C.a, C.b, C.a, C.b]));
+        rect(0, 0, 10, H, grad(0, 0, 0, H, [C.a, C.b, C.a]));
         hazard(0, 0, W, 14);
 
-        /* --- światła startowe i marka --- */
+        /* ===== 3. lewa kolumna ===== */
         for (let i = 0; i < 5; i++) {
-            const x = P + 15 + i * 42;
-            circle(x, 62, 17); fill('#05060a'); stroke('rgba(255,255,255,0.18)', 1.5);
-            glow(C.a, 22); circle(x, 62, 10); fill(C.a); noGlow();
-            circle(x - 3, 59, 3); fill('rgba(255,255,255,0.65)');
+            const x = P + 15 + i * 40;
+            circle(x, 56, 16); fill('#05060a'); stroke('rgba(255,255,255,0.18)', 1.5);
+            glow(C.a, 22); circle(x, 56, 9.5); fill(C.a); noGlow();
+            circle(x - 3, 53, 3); fill('rgba(255,255,255,0.65)');
         }
-        font(22, true); spacing(9); text('FIA SYSTEM', W - P + 9, 70, soft, 'right'); spacing(0);
+        font(21, true); spacing(9); text('FIA SYSTEM', P + 220, 64, soft); spacing(0);
 
-        /* --- wielki tytuł + numer sprawy --- */
         const words = L('Werdykt stewardów', 'Stewards’ verdict').toUpperCase().split(' ');
-        const badgeW = 280, titleW = CW - badgeW - 44;
-        const t1 = fit(words[0], 136, 60, titleW, 1, true, true), t2 = fit(words.slice(1).join(' '), 94, 44, titleW, 1, true, true);
-        font(t1.fs, true, true); text(words[0], P + 7, 222 + 7, C.a);
-        text(words[0], P, 222, grad(0, 222 - t1.fs * 0.75, 0, 222, ['#ffffff', '#ffffff', '#aab3c8']));
-        font(t2.fs, true, true); glow('rgba(' + C.rgb + ',0.8)', 20); text(words.slice(1).join(' '), P, 318, accent(P, titleW)); noGlow();
+        const badgeW = 300, titleW = LW - badgeW - 44;
+        const t1 = fit(words[0], 124, 60, titleW, 1, true, true), t2 = fit(words.slice(1).join(' '), 86, 44, titleW, 1, true, true);
+        font(t1.fs, true, true); text(words[0], P + 7, 178 + 7, C.a);
+        text(words[0], P, 178, grad(0, 178 - t1.fs * 0.75, 0, 178, ['#ffffff', '#ffffff', '#aab3c8']));
+        font(t2.fs, true, true); glow('rgba(' + C.rgb + ',0.8)', 20); text(words.slice(1).join(' '), P, 254, accent(P, titleW)); noGlow();
 
-        const bx = W - P - badgeW, by = 122;
-        glow('rgba(' + C.rgb + ',0.7)', 34); cham(bx, by, badgeW, 188, 34); fill(grad(bx, by, bx + badgeW, by + 188, [C.a, C.b])); noGlow();
-        cham(bx + 8, by + 8, badgeW - 16, 172, 28); fill('rgba(8,9,15,0.90)');
-        label(L('Sprawa', 'Case'), bx + badgeW / 2, by + 52, mute, 'center');
-        const idf = fit(r.id, 62, 22, badgeW - 44, 2, true, true);
-        put(idf, bx + badgeW / 2, by + 68 + (96 - idf.h) / 2, white, 'center');
+        const bx = P + LW - badgeW, by = 82;
+        glow('rgba(' + C.rgb + ',0.7)', 34); cham(bx, by, badgeW, 168, 34); fill(grad(bx, by, bx + badgeW, by + 168, [C.a, C.b])); noGlow();
+        cham(bx + 8, by + 8, badgeW - 16, 152, 28); fill('rgba(8,9,15,0.90)');
+        label(L('Sprawa', 'Case'), bx + badgeW / 2, by + 48, mute, 'center');
+        const idf = fit(r.fiaId || r.id, 62, 22, badgeW - 44, 2, true, true);
+        put(idf, bx + badgeW / 2, by + 62 + (86 - idf.h) / 2, white, 'center');
 
-        /* --- tor, split, sesja --- */
-        let y = 366;
-        const track = fit(r.track || '—', 44, 28, CW - 76, 2, true, true);
-        const trH = track.h + 36;
-        path([[P + 24, y], [W - P, y], [W - P - 24, y + trH], [P, y + trH]]); fill(grad(P, y, W - P, y, ['#ffffff', '#cfd5e4']));
-        put(track, W / 2, y + 18, ink, 'center');
-        y += trH + 16;
-        let cx = P;
-        [r.split, r.sessionType].filter(Boolean).forEach((s, i) => {
-            const f = fit(s, 24, 16, CW / 2 - 60, 2, true);
-            font(f.fs, true); const w = Math.max(...f.lines.map(l => g.measureText(l).width)) + 48, h = f.h + 22;
-            cham(cx, y, w, h, 14); fill(i ? 'rgba(255,255,255,0.08)' : accent(cx, w)); if (i) stroke('rgba(255,255,255,0.22)', 1.5);
-            put(f, cx + w / 2, y + 11, white, 'center');
-            cx += w + 14;
+        path([[P + 22, trackY], [P + LW, trackY], [P + LW - 22, trackY + trackH], [P, trackY + trackH]]); fill(grad(P, 0, P + LW, 0, ['#ffffff', '#cfd5e4']));
+        put(trackF, P + LW / 2, trackY + 14, ink, 'center');
+        const chipY = trackY + trackH + 14;
+        chips.forEach(c => {
+            cham(c.x, chipY, c.w, chipH, 14); fill(c.i ? 'rgba(255,255,255,0.08)' : accent(c.x, c.w)); if (c.i) stroke('rgba(255,255,255,0.22)', 1.5);
+            put(c.f, c.x + c.w / 2, chipY + (chipH - c.f.h) / 2, white, 'center');
         });
-        y += 108;
 
-        /* --- bohater: winny --- */
-        const heroTop = y;
-        const full = d.noOneGuilty ? L('Brak winnego', 'No one guilty') : String(d.guiltyNick || '—').trim();
-        const parts = full.split(/\s+/);
-        const big = !d.noOneGuilty && parts.length > 1 ? parts[parts.length - 1] : full;
-        const small = !d.noOneGuilty && parts.length > 1 ? parts.slice(0, -1).join(' ') : '';
-        const tag = L('Winny', 'Guilty').toUpperCase();
-        font(24, true, true); const tagW = g.measureText(tag).width + 70;
-        path([[P + 16, y], [P + tagW + 16, y], [P + tagW, y + 46], [P, y + 46]]); fill(accent(P, tagW));
-        text(tag, P + tagW / 2 + 8, y + 32, white, 'center');
-        y += 66;
-        if (small) { const f = fit(small, 56, 26, CW, 3, false, true); put(f, P + 4, y, soft); y += f.h + 2; }
-        const nf = fit(big, 164, 54, CW - 24, d.noOneGuilty ? 1 : 2, true, true);
-        font(nf.fs, true, true);
-        nf.lines.forEach((l, i) => {
-            const ly = y + nf.fs * 0.88 + i * nf.lh;
+        const tagY = heroY + (headH - 44) / 2;
+        path([[P + 15, tagY], [P + tagW + 15, tagY], [P + tagW, tagY + 44], [P, tagY + 44]]); fill(accent(P, tagW));
+        font(23, true, true); text(tag, P + tagW / 2 + 7, tagY + 30, white, 'center');
+        if (smallF) put(smallF, P + tagW + 40, heroY + (headH - smallF.h) / 2, soft);
+        const nameY = heroY + headH + 8;
+        font(nameF.fs, true, true);
+        nameF.lines.forEach((l, i) => {
+            const ly = nameY + nameF.fs * 0.88 + i * nameF.lh;
             text(l, P + 9, ly + 8, C.a);
-            glow('rgba(0,0,0,0.65)', 18); text(l, P, ly, grad(0, ly - nf.fs * 0.75, 0, ly + 8, ['#ffffff', '#ffffff', '#b8c0d4'])); noGlow();
+            glow('rgba(0,0,0,0.65)', 18); text(l, P, ly, grad(0, ly - nameF.fs * 0.75, 0, ly + 8, ['#ffffff', '#ffffff', '#b8c0d4'])); noGlow();
         });
-        y += nf.h + 22;
-        rect(P, y, CW, 6, grad(P, 0, W - P, 0, [C.a, C.b, 'rgba(' + C.rgb + ',0)'])); y += 40;
+        rect(P, nameY + nameF.h + 18, LW, 6, grad(P, 0, P + LW, 0, [C.a, C.b, 'rgba(' + C.rgb + ',0)']));
 
-        /* --- kary --- */
-        const ptsStr = String(d.pointsPenalty || '0 pkt').trim(), m = ptsStr.match(/^([+-]?\d+(?:[.,]\d+)?)\s*(.*)$/);
-        const pw = 548, gap = 20, tw = CW - pw - gap;
-        const pFit = m ? null : fit(ptsStr, 86, 28, pw - 70, 5, true, true);
-        const timeStr = d.timePenalty || L('brak', 'none');
-        const tFit = fit(timeStr, 118, 30, tw - 56, 4, true, true);
-        const ph = Math.max(340, tFit.h + 190, pFit ? pFit.h + 130 : 0);
-        const pOn = pts > 0;
+        const ph = mainB - penY, pOn = pts > 0;
         if (pOn) {
-            glow('rgba(' + C.rgb + ',0.85)', 46); cham(P, y, pw, ph, 40); fill(grad(P, y, P + pw, y + ph, [C.a, C.b])); noGlow();
-            g.save(); cham(P, y, pw, ph, 40); g.clip();
-            for (let i = 0; i < 6; i++) { const x = P + pw - 190 + i * 44; path([[x + 90, y], [x + 112, y], [x + 22, y + ph], [x, y + ph]]); fill('rgba(255,255,255,' + (0.05 + i * 0.018) + ')'); }
+            glow('rgba(' + C.rgb + ',0.85)', 46); cham(P, penY, pw, ph, 40); fill(grad(P, penY, P + pw, penY + ph, [C.a, C.b])); noGlow();
+            g.save(); cham(P, penY, pw, ph, 40); g.clip();
+            for (let i = 0; i < 6; i++) { const x = P + pw - 200 + i * 46; path([[x + 90, penY], [x + 113, penY], [x + 23, penY + ph], [x, penY + ph]]); fill('rgba(255,255,255,' + (0.05 + i * 0.018) + ')'); }
             g.restore();
-        } else panel(P, y, pw, ph);
-        label(L('Punkty karne', 'Penalty points'), P + 36, y + 56, pOn ? white : mute, 'left', 22);
+        } else panel(P, penY, pw, ph);
+        label(L('Punkty karne', 'Penalty points'), P + 36, penY + 50, pOn ? white : mute, 'left', 22);
         if (m) {
-            let ns = 260, us = 76, nw, uw;
+            let ns = Math.min(270, Math.round((ph - 70) * 1.04)), us = 76, nw, uw;
             for (;;) { font(ns, true, true); nw = g.measureText(m[1]).width; font(us, true, true); uw = m[2] ? g.measureText(m[2]).width : 0; if (nw + uw + 24 <= pw - 80 || ns <= 40) break; ns -= 4; us = Math.max(22, us - 1.2); }
-            const x = P + (pw - nw - uw - (uw ? 24 : 0)) / 2, base = y + ph / 2 + 36 + ns * 0.3;
+            const x = P + (pw - nw - uw - (uw ? 24 : 0)) / 2, base = penY + (ph + 44) / 2 + ns * 0.36;
             font(ns, true, true); glow('rgba(0,0,0,0.45)', 24); text(m[1], x, base, pOn ? white : mute); noGlow();
             if (m[2]) { font(us, true, true); text(m[2], x + nw + 24, base, pOn ? white : mute); }
-        } else put(pFit, P + pw / 2, y + 84 + (ph - 100 - pFit.h) / 2, pOn ? white : mute, 'center');
+        } else put(pFit, P + pw / 2, penY + 70 + (ph - 86 - pFit.h) / 2, pOn ? white : mute, 'center');
 
-        const tx = P + pw + gap, mid = tx + tw / 2;
-        panel(tx, y, tw, ph, hasTime);
-        label(L('Kara czasowa', 'Time penalty'), mid, y + 56, hasTime ? white : mute, 'center', 22);
-        // ikona stopera
-        const sy = y + 114, col = hasTime ? C.b : '#59607a';
-        circle(mid, sy, 28); stroke(col, 5);
-        g.beginPath(); g.moveTo(mid, sy - 28); g.lineTo(mid, sy - 40); g.moveTo(mid - 11, sy - 41); g.lineTo(mid + 11, sy - 41); g.moveTo(mid, sy); g.lineTo(mid + 14, sy - 14); stroke(col, 5);
-        put(tFit, mid, y + 160 + (ph - 180 - tFit.h) / 2, hasTime ? white : mute, 'center');
-        y += ph + 46;
+        const tx = P + pw + 20, mid = tx + tw / 2;
+        panel(tx, penY, tw, ph, hasTime);
+        label(L('Kara czasowa', 'Time penalty'), mid, penY + 50, hasTime ? white : mute, 'center', 22);
+        const sy = penY + 102, col = hasTime ? C.b : '#59607a';
+        circle(mid, sy, 24); stroke(col, 5);
+        g.beginPath(); g.moveTo(mid, sy - 24); g.lineTo(mid, sy - 34); g.moveTo(mid - 10, sy - 35); g.lineTo(mid + 10, sy - 35); g.moveTo(mid, sy); g.lineTo(mid + 12, sy - 12); stroke(col, 5);
+        put(tFit, mid, penY + 134 + (ph - 146 - tFit.h) / 2, hasTime ? white : mute, 'center');
 
-        /* --- decyzja --- */
-        const df = fit(d.decision || '—', 48, 28, CW - 80, 4, true, true);
-        const dh = df.h + 104;
-        rect(P, y, CW, dh, 'rgba(5,6,10,0.88)'); hazard(P, y, CW, 14); hazard(P, y + dh - 14, CW, 14);
-        label(L('Decyzja', 'Decision'), W / 2, y + 52, C.b, 'center');
-        put(df, W / 2, y + 68, white, 'center');
-        y += dh + 22;
+        /* ===== 4. prawa kolumna ===== */
+        // przy uzasadnieniu przeniesionym na dół wolne miejsce rozkłada się równo między panele
+        const gap = rs ? GAP : GAP + Math.max(0, mainB - rightNeed) / Math.max(1, fixed.length - 1);
+        let y = TOP;
+        rect(X2, y, RW, decH, 'rgba(5,6,10,0.88)'); hazard(X2, y, RW, 12); hazard(X2, y + decH - 12, RW, 12);
+        label(L('Decyzja', 'Decision'), X2 + RW / 2, y + 42, C.b, 'center');
+        put(df, X2 + RW / 2, y + 54, white, 'center');
+        y += decH + gap;
 
-        extras(d).forEach((x, i) => {
-            const f = fit(x.decision + ' — ' + (x.timePenalty || L('brak', 'none')) + ', ' + (x.pointsPenalty || '0 pkt'), 30, 22, CW - 80, 6, true);
-            const h = f.h + 82;
-            panel(P, y, CW, h); rect(P + 18, y + 28, 6, h - 56, C.a);
-            label(L('Dodatkowa decyzja ', 'Extra decision ') + (i + 1), P + 44, y + 40);
-            put(f, P + 44, y + 54, white);
-            y += h + 16;
+        ex.forEach(e => {
+            panel(X2, y, RW, e.h); rect(X2 + 16, y + 18, 5, e.h - 36, C.a);
+            label(e.title, X2 + 38, y + 28, mute, 'left', 15);
+            put(e.f, X2 + 38, y + 38, white);
+            y += e.h + gap;
         });
-        y += 6;
 
-        /* --- strony i kategoria --- */
-        const half = (CW - 20) / 2;
-        const who = [[L('Oskarżony', 'Accused'), r.accusedNick || '—', true], [L('Zgłaszający', 'Reporter'), r.nick || '—', false]]
-            .map(a => ({ title: a[0], name: a[1], hot: a[2], f: fit(a[1], 32, 20, half - 138, 4, true) }));
-        const wh = Math.max(128, ...who.map(a => a.f.h + 82));
         who.forEach((a, i) => {
-            const x = P + i * (half + 20);
-            panel(x, y, half, wh);
-            monogram(a.name, x + 62, y + wh / 2, 36, a.hot && penalised);
-            const top = y + (wh - a.f.h - 36) / 2;
-            label(a.title, x + 118, top + 20, mute, 'left', 17);
-            put(a.f, x + 118, top + 34, white);
+            const x = X2 + i * (half + GAP);
+            panel(x, y, half, whoH);
+            monogram(a.name, x + 52, y + whoH / 2, 30, a.hot && penalised);
+            const top = y + (whoH - a.f.h - 32) / 2;
+            label(a.title, x + 98, top + 18, mute, 'left', 15);
+            put(a.f, x + 98, top + 30, white);
         });
-        y += wh + 20;
-        const cat = fit(r.category || '—', 31, 24, CW - 72, 8, true);
-        const ch = cat.h + 90;
-        panel(P, y, CW, ch);
-        label(L('Kategoria', 'Category'), P + 36, y + 42, C.b);
-        put(cat, P + 36, y + 58, white);
-        y += ch + 20;
+        y += whoH + gap;
 
-        /* --- uzasadnienie --- */
-        font(28, false);
-        const paras = String(d.verdictDetails || L('(brak uzasadnienia)', '(no reasoning)')).split(/\r?\n/).map(s => s.trim()).filter(Boolean).map(s => wrap(s, CW - 116));
-        const rh = 110 + paras.reduce((a, p) => a + p.length * 41 + 18, 0);
-        panel(P, y, CW, rh);
-        font(230, true, true); text('”', W - P - 36, y + 190, 'rgba(255,255,255,0.07)', 'right');
-        const head = L('Uzasadnienie', 'Reasoning').toUpperCase();
-        font(23, true, true); const hw = g.measureText(head).width + 60;
-        path([[P + 36, y + 26], [P + 36 + hw, y + 26], [P + 22 + hw, y + 70], [P + 22, y + 70]]); fill(accent(P, hw));
-        text(head, P + 29 + hw / 2, y + 57, white, 'center');
-        let ly = y + 122;
-        paras.forEach(p => {
-            path([[P + 44, ly - 18], [P + 53, ly - 9], [P + 44, ly], [P + 35, ly - 9]]); fill(C.b);
-            font(28, false); p.forEach(l => { text(l, P + 76, ly, soft); ly += 41; });
-            ly += 18;
-        });
-        y += rh + 20;
+        panel(X2, y, RW, catH);
+        label(L('Kategoria', 'Category'), X2 + 30, y + 34, C.b, 'left', 17);
+        put(catF, X2 + 30, y + 46, white);
+        y += catH + gap;
 
-        /* --- oś czasu --- */
-        panel(P, y, CW, 158);
-        const x1 = P + 48, x2 = W - P - 48;
-        glow(C.a, 16); rect(x1, y + 46, x2 - x1, 5, accent(x1, x2 - x1)); noGlow();
-        [x1, x2].forEach((x, i) => { circle(x, y + 48.5, 15); fill(ink); stroke(i ? C.b : C.a, 5); circle(x, y + 48.5, 5); fill(white); });
-        [[L('Data zgłoszenia', 'Reported'), F.fmtDate(F.ts(r)), P + 32, 'left'], [L('Data werdyktu', 'Issued'), F.fmtDate(d.issuedAt), W - P - 32, 'right']].forEach(a => {
-            label(a[0], a[2], y + 98, mute, a[3], 17);
-            font(31, true, true); text(a[1], a[2], y + 135, white, a[3]);
-        });
-        y += 178;
-
-        /* --- sędzia i zatwierdzający jako plakietki --- */
-        function people(title, names, hot) {
-            if (!names.length) return;
-            const items = []; let px = 0, row = 0;
-            names.forEach(n => {
-                const f = fit(n, 28, 18, CW - 200, 3, true);
-                font(f.fs, true); const w = Math.max(...f.lines.map(l => g.measureText(l).width)) + 112;
-                if (px && px + w > CW - 64) { px = 0; row++; }
-                items.push({ n, f, w, px, row }); px += w + 14;
+        const chipTitle = (title, x, ty) => {
+            const s = title.toUpperCase(); font(21, true, true); const w = g.measureText(s).width + 54;
+            path([[x + 13, ty], [x + 13 + w, ty], [x + w, ty + 40], [x, ty + 40]]); fill(accent(x, w));
+            text(s, x + w / 2 + 6, ty + 28, white, 'center');
+        };
+        const bullet = (x, base, fs) => { const s = fs * 0.34; path([[x + s, base - 2 * s], [x + 2 * s, base - s], [x + s, base], [x, base - s]]); fill(C.b); };
+        if (rs) {
+            panel(X2, y, RW, avail);
+            font(170, true, true); text('”', X2 + RW - 28, y + 142, 'rgba(255,255,255,0.07)', 'right');
+            chipTitle(L('Uzasadnienie', 'Reasoning'), X2 + 24, y + 18);
+            let ly = y + 74 + rs.fs;
+            rs.paras.forEach(p => {
+                bullet(X2 + 28, ly - 1, rs.fs);
+                font(rs.fs, false); p.forEach(l => { text(l, X2 + 62, ly, soft); ly += lineH(rs.fs); });
+                ly += 8;
             });
-            const rowsH = [];
-            items.forEach(it => { rowsH[it.row] = Math.max(rowsH[it.row] || 66, it.f.h + 26); });
-            const h = 70 + rowsH.reduce((a, b) => a + b + 12, 0) + 10;
-            panel(P, y, CW, h);
-            label(title, P + 36, y + 44, mute);
+            y += avail + gap;
+        }
+
+        panel(X2, y, RW, timeH);
+        const x1 = X2 + 40, x2 = X2 + RW - 40;
+        glow(C.a, 16); rect(x1, y + 28, x2 - x1, 5, accent(x1, x2 - x1)); noGlow();
+        [x1, x2].forEach((x, i) => { circle(x, y + 30.5, 13); fill(ink); stroke(i ? C.b : C.a, 4.5); circle(x, y + 30.5, 4.5); fill(white); });
+        [[L('Data zgłoszenia', 'Reported'), F.fmtDate(F.ts(r)), X2 + 26, 'left'], [L('Data werdyktu', 'Issued'), F.fmtDate(d.issuedAt), X2 + RW - 26, 'right']].forEach(a => {
+            label(a[0], a[2], y + 66, mute, a[3], 15);
+            font(28, true, true); text(a[1], a[2], y + 96, white, a[3]);
+        });
+        y += timeH + gap;
+
+        panel(X2, y, RW, offH);
+        label(L('Sędzia', 'Judge'), X2 + 26, y + 36, mute, 'left', 15);
+        const jh = Math.max(52, judgeF.h + 18);
+        monogram(d.judge || '—', X2 + 48, y + 52 + jh / 2, 22, true);
+        put(judgeF, X2 + 82, y + 52 + (jh - judgeF.h) / 2, white);
+        if (items.length) {
+            const ax = X2 + judgeW + 8;
+            rect(ax - 12, y + 22, 1.5, offH - 44, 'rgba(255,255,255,0.16)');
+            label(L('Zatwierdzili', 'Approved by'), ax + 8, y + 36, mute, 'left', 15);
             items.forEach(it => {
-                const iy = y + 64 + rowsH.slice(0, it.row).reduce((a, b) => a + b + 12, 0), ix = P + 32 + it.px, ih = rowsH[it.row];
-                cham(ix, iy, it.w, ih, 18); fill('rgba(255,255,255,0.07)'); stroke('rgba(255,255,255,0.16)', 1.5);
-                monogram(it.n, ix + 42, iy + ih / 2, 25, hot);
-                put(it.f, ix + 82, iy + (ih - it.f.h) / 2, white);
+                const iy = y + 52 + rowsH.slice(0, it.row).reduce((a, b) => a + b + 8, 0), ix = ax + 4 + it.px, ih = rowsH[it.row];
+                cham(ix, iy, it.w, ih, 14); fill('rgba(255,255,255,0.07)'); stroke('rgba(255,255,255,0.16)', 1.5);
+                monogram(it.n, ix + 30, iy + ih / 2, 19, false);
+                put(it.f, ix + 60, iy + (ih - it.f.h) / 2, white);
             });
-            y += h + 20;
         }
-        people(L('Sędzia', 'Judge'), [d.judge || '—'], true);
-        people(L('Zatwierdzili', 'Approved by'), approved(d) ? (Array.isArray(d.approvedBy) ? d.approvedBy : Object.values(d.approvedBy)).map(a => a && a.nick).filter(Boolean) : [], false);
 
-        /* --- stopka: falująca flaga w szachownicę --- */
-        y += 22;
-        font(19, false); spacing(1);
-        text('FIA System · ' + L('wygenerowano', 'generated') + ' ' + new Date().toLocaleString(F.lang() === 'en' ? 'en-GB' : 'pl-PL'), W / 2, y, mute, 'center'); spacing(0);
-        y += 30;
-        const s = 20;
-        for (let i = 0; i < Math.ceil(W / s); i++) {
-            const dy = Math.sin(i / 5) * 11 + 12;
-            for (let j = 0; j < 3; j++) rect(i * s, y + dy + j * s, s + 0.6, s + 0.6, (i + j) % 2 ? '#05060a' : '#f4f6fb');
-            rect(i * s, y + dy, s + 0.6, 3 * s, 'rgba(0,0,0,' + (0.18 + 0.18 * Math.cos(i / 5)) + ')');
+        /* ===== 5. długie uzasadnienie na całą szerokość ===== */
+        if (wide) {
+            const wy = mainB + 20, ww = W - 44 - P;
+            panel(P, wy, ww, wide.h);
+            chipTitle(L('Uzasadnienie', 'Reasoning'), P + 28, wy + 22);
+            wide.cols.forEach((c, i) => {
+                const x = P + 28 + i * (wide.colW + 8); let ly = wy + 94 + wide.fs;
+                c.forEach(it => { if (it.first) bullet(x + 2, ly - 1, wide.fs); font(wide.fs, false); text(it.l, x + 34, ly, soft); ly += it.h; });
+            });
         }
-        y += 3 * s + 40;
-        hazard(0, y - 14, W, 14);
-        return y;
+
+        /* ===== 6. stopka z falującą flagą ===== */
+        font(18, false); spacing(1);
+        text('FIA System · ' + L('wygenerowano', 'generated') + ' ' + new Date().toLocaleString(F.lang() === 'en' ? 'en-GB' : 'pl-PL'), W / 2, contentB + 26, mute, 'center'); spacing(0);
+        const s = 16, fy = contentB + 36;
+        for (let i = 0; i < Math.ceil(W / s); i++) {
+            const dy = Math.sin(i / 6) * 8 + 8;
+            for (let j = 0; j < 2; j++) rect(i * s, fy + dy + j * s, s + 0.6, s + 0.6, (i + j) % 2 ? '#05060a' : '#f4f6fb');
+            rect(i * s, fy + dy, s + 0.6, 2 * s, 'rgba(0,0,0,' + (0.18 + 0.18 * Math.cos(i / 6)) + ')');
+        }
+        hazard(0, totalH - 12, W, 12);
+        return totalH;
     }
 
-    async function verdictPng(id) {
-        const r = F.incidents().find(x => String(x.id) === String(id));
-        if (!r || !r.decisionData) { F.toast(L('Brak werdyktu', 'No verdict'), id); return null; }
+    // renderuje grafikę z podanego zgłoszenia; maxPx = największa szerokość wynikowego obrazu
+    async function verdictImage(r, maxPx) {
+        const d = r.decisionData;
+        // starsze werdykty nie mają zapisanego nicku winnego — ustalamy go tak samo jak przy ponownej wysyłce
+        if (!d.noOneGuilty && !d.guiltyNick && typeof resolveGuiltyPartyNick === 'function') {
+            r = Object.assign({}, r, { decisionData: Object.assign({}, d, { guiltyNick: resolveGuiltyPartyNick(r, d.guiltyDiscordId || r.accusedDiscordId || null, '—') }) });
+        }
         await pngFonts();
-        const W = 1080, cv = document.createElement('canvas');
+        const cv = document.createElement('canvas');
         cv.width = cv.height = 1;
-        const H = Math.ceil(paintVerdict(cv.getContext('2d'), r, r.decisionData, W, 1, 1)); // 1. przebieg: pomiar wysokości
-        // zwykle 2× (2160 px szerokości); przy bardzo długich werdyktach mniej, by zmieścić się w limitach canvas (także na telefonach)
-        const k = Math.min(2, Math.sqrt(16e6 / (W * H)), 16000 / H);
-        cv.width = Math.floor(W * k); cv.height = Math.floor(H * k);
+        const measure = cv.getContext('2d'), height = w => Math.ceil(paintVerdict(measure, r, r.decisionData, w, 1, 1));
+        // szeroki układ 16:9: najmniejsza szerokość robocza, przy której cała treść mieści się na jednym ekranie (większa = nieco mniejszy tekst)
+        let W = 1920, H = 0;
+        for (let w = 1920; w <= 2560 && !H; w += 80) { const screen = Math.round(w * 9 / 16); if (height(w) <= screen) { W = w; H = screen; } }
+        if (!H) H = height(W); // bardzo długi werdykt: ta sama szerokość, uzasadnienie pod spodem
+        // przy bardzo długich werdyktach mniejsza skala, by zmieścić się w limitach canvas (także na telefonach)
+        const k = Math.min(maxPx / W, Math.sqrt(16e6 / (W * H)), 16000 / H);
+        cv.width = Math.floor(W * k + 1e-6); cv.height = Math.floor(H * k + 1e-6);
         const g = cv.getContext('2d'); g.scale(k, k);
         paintVerdict(g, r, r.decisionData, W, H, k);
         const blob = await new Promise((res, rej) => cv.toBlob(b => b ? res(b) : rej(new Error('PNG')), 'image/png'));
-        const file = { name: 'fia-werdykt-' + F.slug(id) + '.png', blob };
         cv.width = cv.height = 0;
+        return blob;
+    }
+
+    // Discord: 1920 px szerokości (16:9 → 1920×1080); gdyby plik przekroczył 8 MB, mniejsza wersja
+    async function verdictImageForDiscord(r) {
+        for (const px of [1920, 1600, 1280]) {
+            const blob = await verdictImage(r, px);
+            if (blob.size <= 8 * 1024 * 1024) return blob;
+        }
+        return null;
+    }
+
+    // przycisk „Pobierz PNG werdyktu” — na jednym ekranie 3840×2160 (4K)
+    async function verdictPng(id) {
+        const r = F.incidents().find(x => String(x.id) === String(id));
+        if (!r || !r.decisionData) { F.toast(L('Brak werdyktu', 'No verdict'), id); return null; }
+        const file = { name: 'fia-werdykt-' + F.slug(id) + '.png', blob: await verdictImage(r, 3840) };
         F.download(file.blob, file.name);
         return [file];
     }
@@ -38964,6 +39072,7 @@ function findAlignmentPattern(matrix, alignmentPatternQuads, topRight, topLeft, 
     });
     F.verdictPdf = verdictPdf;
     F.verdictPng = verdictPng;
+    F.verdictImageForDiscord = verdictImageForDiscord;
     F._pdf = { pdfDoc, header, footer, needsUnicode };
 })();
 
