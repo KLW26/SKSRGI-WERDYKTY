@@ -38429,36 +38429,498 @@ function findAlignmentPattern(matrix, alignmentPatternQuads, topRight, topLeft, 
         const r = F.incidents().find(x => String(x.id) === String(id));
         if (!r || !r.decisionData) return F.toast(L('Brak werdyktu', 'No verdict'), id);
         await F.loadLib('qr');
-        const doc = await pdfDoc(JSON.stringify([r, F.appeals().filter(a => String(a.caseId) === String(r.id))])); const d = r.decisionData; const W = doc.internal.pageSize.getWidth();
-        header(doc, L('Werdykt stewardów', 'Stewards’ verdict'), L('Sprawa ', 'Case ') + r.id + ' · ' + (r.track || '') + ' · ' + (r.split || '') + ' · ' + (r.sessionType || ''));
+        const doc = await pdfDoc(JSON.stringify([r, F.appeals().filter(a => String(a.caseId) === String(r.id))])); const d = r.decisionData;
+        const W = doc.internal.pageSize.getWidth();
         const payload = ['FIA-VERDICT', r.id, d.issuedAt || '', d.decision, d.timePenalty || '', d.pointsPenalty || '', d.guiltyDiscordId || ''].join('|');
         const hash = await sha(payload);
-        const rows = [
-            [L('Decyzja', 'Decision'), d.decision], [L('Kara czasowa', 'Time penalty'), d.timePenalty || L('brak', 'none')], [L('Punkty karne', 'Penalty points'), d.pointsPenalty || '0 pkt']
-        ].concat(extras(d).map((x, i) => [L('Dodatkowa decyzja ', 'Extra decision ') + (i + 1), x.decision + ' — ' + (x.timePenalty || 'brak') + ', ' + (x.pointsPenalty || '0 pkt')]))
-            .concat([[L('Winny', 'Guilty'), d.noOneGuilty ? L('(nikt nie został uznany za winnego)', '(nobody found guilty)') : (d.guiltyNick || '—')],
-            [L('Zgłaszający', 'Reporter'), r.nick || '—'], [L('Oskarżony', 'Accused'), r.accusedNick || '—'], [L('Kategoria', 'Category'), r.category || '—'],
-            [L('Data zgłoszenia', 'Reported'), F.fmtDate(F.ts(r))], [L('Data werdyktu', 'Issued'), F.fmtDate(d.issuedAt)], [L('Sędzia', 'Judge'), d.judge || '—']]);
-        if (approved(d)) rows.push([L('Zatwierdzili', 'Approved by'), approved(d)]);
-        doc.autoTable({ startY: 30, body: rows, theme: 'plain', styles: { font: 'LibSans', fontSize: 10, cellPadding: 2, textColor: [30, 32, 42] }, columnStyles: { 0: { fontStyle: 'bold', cellWidth: 42, textColor: [95, 99, 112] } }, margin: { left: 14, right: 62 } });
-        let y = doc.lastAutoTable.finalY + 8;
-        doc.setFont('LibSans', 'bold'); doc.setFontSize(11); doc.text(L('Uzasadnienie', 'Reasoning'), 14, y);
-        doc.setFont('LibSans', 'normal'); doc.setFontSize(10);
-        const lines = doc.splitTextToSize(d.verdictDetails || L('(brak uzasadnienia)', '(no reasoning)'), W - 28);
-        let yy = y + 6;
-        lines.forEach(l => { if (yy > 275) { doc.addPage(); yy = 18; } doc.text(l, 14, yy); yy += 5; });
-        // QR (wektorowy) + suma kontrolna
+
+        /* --- paleta i pomocnicze funkcje rysowania --- */
+        const C = { night: [16, 18, 27], red: [225, 6, 0], ink: [22, 24, 33], mute: [108, 113, 128], line: [224, 226, 233], soft: [245, 246, 249], tint: [253, 238, 237], green: [22, 128, 74], greenTint: [233, 246, 238], white: [255, 255, 255], pale: [178, 183, 199] };
+        const M = 14, CW = W - 2 * M;
+        const fill = c => doc.setFillColor(c[0], c[1], c[2]);
+        const draw = c => doc.setDrawColor(c[0], c[1], c[2]);
+        const font = (style, size, color) => { doc.setFont('LibSans', style); doc.setFontSize(size); doc.setTextColor(color[0], color[1], color[2]); };
+        const box = (x, y, w, h, c, rad) => { fill(c); doc.roundedRect(x, y, w, h, rad == null ? 2 : rad, rad == null ? 2 : rad, 'F'); };
+        const lh = size => size * 0.3528 * 1.22;
+        const label = (text, x, y, color, opt) => { font('bold', 7, color || C.mute); doc.text(String(text).toUpperCase(), x, y, opt); };
+        // Dobiera rozmiar czcionki tak, by tekst zmieścił się w maxLines liniach bez łamania słów
+        function fit(text, style, size, min, width, maxLines) {
+            const s = String(text); let fs = size, lines;
+            for (;;) {
+                doc.setFont('LibSans', style); doc.setFontSize(fs);
+                lines = doc.splitTextToSize(s, width);
+                const longest = Math.max(...s.split(/\s+/).map(word => doc.getTextWidth(word)));
+                if ((lines.length <= maxLines && longest <= width) || fs <= min) return { fs, lines, h: lines.length * lh(fs) };
+                fs -= 0.5;
+            }
+        }
+        function put(f, style, color, x, y, opt) { font(style, f.fs, color); f.lines.forEach((t, i) => doc.text(t, x, y + i * lh(f.fs), opt)); }
+
+        /* --- nagłówek --- */
+        fill(C.night); doc.rect(0, 0, W, 46, 'F');
+        fill(C.red); doc.rect(0, 46, W, 1.6, 'F');
+        const sq = 3.2, cols = 20, rowsN = 4; // szachownica zanikająca w stronę lewej krawędzi
+        for (let i = 0; i < cols; i++) for (let j = 0; j < rowsN; j++) {
+            if ((i + j) % 2) continue;
+            const k = 0.34 * Math.pow((i + 1) / cols, 1.6);
+            fill(C.night.map(v => Math.round(v + (255 - v) * k)));
+            doc.rect(W - (cols - i) * sq, j * sq, sq, sq, 'F');
+        }
+        fill(C.red); doc.rect(M, 8, 9, 1.4, 'F');
+        label('FIA System', M + 12, 9.7, C.white);
+        font('bold', 24, C.white); doc.text(L('Werdykt stewardów', 'Stewards’ verdict'), M, 23);
+        const caseW = 50, caseX = W - M - caseW;
+        box(caseX, 17, caseW, 20, C.red);
+        label(L('Sprawa', 'Case'), caseX + caseW / 2, 23.5, C.white, { align: 'center' });
+        put(fit(r.id, 'bold', 19, 9, caseW - 6, 1), 'bold', C.white, caseX + caseW / 2, 32.5, { align: 'center' });
+        put(fit(r.track || '—', 'bold', 11.5, 8, caseX - M - 6, 1), 'bold', C.white, M, 32.5);
+        put(fit([r.split, r.sessionType].filter(Boolean).join('  ·  '), 'normal', 9, 7, caseX - M - 6, 1), 'normal', C.pale, M, 38.5);
+
+        /* --- blok weryfikacji ma stałe miejsce na dole 1. strony --- */
+        const VY = 230, VH = 49;
+        let page = 1, y = 55;
+        const limit = () => page === 1 ? VY - 5 : 278;
+        function newPage() {
+            doc.addPage(); page++;
+            fill(C.night); doc.rect(0, 0, W, 13, 'F'); fill(C.red); doc.rect(0, 13, W, 1, 'F');
+            font('bold', 9, C.white); doc.text(L('Werdykt stewardów', 'Stewards’ verdict') + '  ·  ' + r.id + '  ·  ' + L('ciąg dalszy', 'continued'), M, 8.4);
+            y = 23;
+        }
+        const ensure = h => { if (y + h > limit()) newPage(); };
+
+        /* --- decyzja i kary --- */
+        const pts = F.points(d.pointsPenalty), secs = F.penSeconds(d.timePenalty);
+        const timeText = d.timePenalty || L('brak', 'none'), ptsText = d.pointsPenalty || '0 pkt';
+        const hasTime = !/^\s*(brak|none|-|—|0\s*s?)?\s*$/i.test(d.timePenalty || '');
+        const penalised = !d.noOneGuilty && (pts > 0 || secs > 0 || hasTime || totalPoints(d) > 0);
+        const accent = penalised ? C.red : C.green;
+
+        const dec = fit(d.decision || '—', 'bold', 17, 11, CW - 16, 2);
+        const decH = 13 + dec.h;
+        box(M, y, CW, decH, penalised ? C.tint : C.greenTint);
+        fill(accent); doc.rect(M, y, 2.2, decH, 'F');
+        label(L('Decyzja', 'Decision'), M + 8, y + 6.5, accent);
+        put(dec, 'bold', C.ink, M + 8, y + 14);
+        y += decH + 4;
+
+        const tileW = (CW - 4) / 2;
+        const tiles = [
+            { title: L('Kara czasowa', 'Time penalty'), value: timeText, on: hasTime, bg: C.night },
+            { title: L('Punkty karne', 'Penalty points'), value: ptsText, on: pts > 0, bg: C.red }
+        ].map(t => Object.assign(t, { f: fit(t.value, 'bold', 28, 11, tileW - 10, 2) }));
+        const tileH = Math.max(27, ...tiles.map(t => 17 + t.f.h));
+        tiles.forEach((t, i) => {
+            const x = M + i * (tileW + 4);
+            if (t.on) box(x, y, tileW, tileH, t.bg);
+            else { draw(C.line); doc.setLineWidth(0.4); doc.roundedRect(x, y, tileW, tileH, 2, 2, 'S'); }
+            label(t.title, x + tileW / 2, y + 7, t.on ? C.white : C.mute, { align: 'center' });
+            const top = y + 10 + (tileH - 10 - t.f.h) / 2 + t.f.fs * 0.3528 * 0.82;
+            put(t.f, 'bold', t.on ? C.white : C.mute, x + tileW / 2, top, { align: 'center' });
+        });
+        y += tileH + 4;
+
+        extras(d).forEach((x, i) => {
+            const f = fit(x.decision + ' — ' + (x.timePenalty || L('brak', 'none')) + ', ' + (x.pointsPenalty || '0 pkt'), 'bold', 10, 9, CW - 10, 6);
+            const h = 8.5 + f.h; ensure(h + 3);
+            box(M, y, CW, h, C.soft);
+            label(L('Dodatkowa decyzja ', 'Extra decision ') + (i + 1), M + 5, y + 5);
+            put(f, 'bold', C.ink, M + 5, y + 10.5);
+            y += h + 3;
+        });
+
+        /* --- strony --- */
+        y += 2;
+        const colW = (CW - 8) / 3;
+        const parties = [
+            { title: L('Winny', 'Guilty'), value: d.noOneGuilty ? L('(nikt nie został uznany za winnego)', '(nobody found guilty)') : (d.guiltyNick || '—'), hi: !d.noOneGuilty && !!d.guiltyNick },
+            { title: L('Oskarżony', 'Accused'), value: r.accusedNick || '—' },
+            { title: L('Zgłaszający', 'Reporter'), value: r.nick || '—' }
+        ].map(p => Object.assign(p, { f: fit(p.value, 'bold', 12, 8.5, colW - 8, 3) }));
+        const pH = 12 + Math.max(...parties.map(p => p.f.h));
+        ensure(pH);
+        parties.forEach((p, i) => {
+            const x = M + i * (colW + 4);
+            box(x, y, colW, pH, C.soft, 1);
+            fill(p.hi ? accent : C.night); doc.rect(x, y, colW, 1.2, 'F');
+            label(p.title, x + 4, y + 7, p.hi ? accent : C.mute);
+            put(p.f, 'bold', C.ink, x + 4, y + 13);
+        });
+        y += pH + 8;
+
+        /* --- kategoria --- */
+        const cat = fit(r.category || '—', 'normal', 11, 9, CW, 6);
+        ensure(7 + cat.h);
+        label(L('Kategoria', 'Category'), M, y);
+        put(cat, 'normal', C.ink, M, y + 5.8);
+        y += 5.8 + cat.h + 3;
+
+        /* --- oś czasu --- */
+        ensure(18);
+        draw(C.line); doc.setLineWidth(0.3); doc.line(M, y, W - M, y);
+        y += 7;
+        draw(C.pale); doc.setLineWidth(0.7); doc.line(M + 2, y, W / 2 + 2, y);
+        fill(C.night); doc.circle(M + 2, y, 1.8, 'F');
+        fill(accent); doc.circle(W / 2 + 2, y, 1.8, 'F');
+        [[L('Data zgłoszenia', 'Reported'), F.fmtDate(F.ts(r)), M], [L('Data werdyktu', 'Issued'), F.fmtDate(d.issuedAt), W / 2]].forEach(t => {
+            label(t[0], t[2], y + 6.5);
+            font('bold', 10.5, C.ink); doc.text(t[1], t[2], y + 11.8);
+        });
+        y += 24;
+
+        /* --- uzasadnienie (łamie się na kolejne strony) --- */
+        ensure(20);
+        fill(C.red); doc.rect(M, y - 3.4, 3.6, 3.6, 'F');
+        font('bold', 12.5, C.ink); doc.text(L('Uzasadnienie', 'Reasoning'), M + 6.5, y);
+        y += 7.5;
+        font('normal', 10, C.ink);
+        doc.splitTextToSize(String(d.verdictDetails || L('(brak uzasadnienia)', '(no reasoning)')), CW - 7).forEach(l => {
+            ensure(5.2);
+            fill(C.line); doc.rect(M + 1.4, y - 3.7, 0.8, 5.25, 'F');
+            font('normal', 10, C.ink); doc.text(l, M + 6.5, y);
+            y += 5.2;
+        });
+
+        /* --- skład sędziowski + QR (wektorowy) + suma kontrolna --- */
+        doc.setPage(1);
+        draw(C.line); doc.setLineWidth(0.4); doc.roundedRect(M, VY, CW, VH, 2, 2, 'S');
+        const qs = 39, qx = W - M - qs - 5, qy = VY + 5;
         const qr = qrcode(0, 'M'); qr.addData(F.utf8bin(payload)); qr.make();
-        const n = qr.getModuleCount(), cell = 36 / n, qx = W - 14 - 36, qy = 30;
-        doc.setFillColor(20, 20, 28);
+        const n = qr.getModuleCount(), cell = qs / n;
+        fill(C.night);
         for (let i = 0; i < n; i++) for (let j = 0; j < n; j++) if (qr.isDark(i, j)) doc.rect(qx + j * cell, qy + i * cell, cell + 0.02, cell + 0.02, 'F');
-        doc.setFont('LibSans', 'normal'); doc.setFontSize(7); doc.setTextColor(120, 124, 136);
-        doc.text(L('Kod weryfikacyjny', 'Verification code'), qx + 18, qy + 40, { align: 'center' });
-        doc.text('SHA-256: ' + hash.slice(0, 16) + '…', qx + 18, qy + 44, { align: 'center' });
-        doc.setFontSize(7.5); doc.text(L('Dane w kodzie QR: ', 'QR payload: ') + payload, 14, 288 - 6, { maxWidth: W - 28 });
+        const leftW = qx - M - 12, half = leftW / 2;
+        label(L('Sędzia', 'Judge'), M + 6, VY + 8);
+        put(fit(d.judge || '—', 'bold', 12, 8, half - 5, 2), 'bold', C.ink, M + 6, VY + 14.5);
+        if (approved(d)) {
+            label(L('Zatwierdzili', 'Approved by'), M + 6 + half, VY + 8);
+            put(fit(approved(d), 'bold', 12, 7.5, half, 3), 'bold', C.ink, M + 6 + half, VY + 14.5);
+        }
+        draw(C.line); doc.line(M + 6, VY + 27, qx - 6, VY + 27);
+        label(L('Kod weryfikacyjny', 'Verification code'), M + 6, VY + 32.5, C.red);
+        font('bold', 8.5, C.ink); doc.text('SHA-256: ' + hash.slice(0, 16) + '…', M + 6, VY + 37);
+        put(fit(L('Dane w kodzie QR: ', 'QR payload: ') + payload, 'normal', 6.5, 4.5, leftW, 3), 'normal', C.mute, M + 6, VY + 41.5);
+
         footer(doc);
         if (o && o.bytes) return doc.output('arraybuffer');
         doc.save('fia-werdykt-' + F.slug(r.id) + '.pdf');
+    }
+
+    /* ---------- PNG: osobna grafika (efektowna ciemna karta, bez kodu QR), rysowana na canvas — zawsze jeden plik, wysokość dopasowana do treści ---------- */
+    let pngFontP = null;
+    function pngFonts() {
+        if (!pngFontP) pngFontP = Promise.all(['regular', 'bold'].map(w => {
+            const bytes = Uint8Array.from(atob(F.asset('font-lsans-' + w)), c => c.charCodeAt(0));
+            return new FontFace('FiaPng', bytes.buffer, { weight: w === 'bold' ? '700' : '400' }).load().then(f => document.fonts.add(f));
+        })).catch(e => console.warn('[FIA] czcionka PNG', e)); // w razie błędu zostaje czcionka systemowa
+        return pngFontP;
+    }
+
+    function paintVerdict(g, r, d, W, H, k) {
+        const P = 56, CW = W - 2 * P;
+        const pts = F.points(d.pointsPenalty), secs = F.penSeconds(d.timePenalty);
+        const hasTime = !/^\s*(brak|none|-|—|0\s*s?)?\s*$/i.test(d.timePenalty || '');
+        const penalised = !d.noOneGuilty && (pts > 0 || secs > 0 || hasTime || totalPoints(d) > 0);
+        const C = penalised ? { a: '#ff1744', b: '#ff8a00', rgb: '255,40,60' } : { a: '#00c978', b: '#00c2ff', rgb: '0,205,130' };
+        const white = '#ffffff', soft = '#dfe3ee', mute = '#929ab1', ink = '#0a0b11';
+
+        /* --- narzędzia --- */
+        const font = (size, bold, italic) => { g.font = (italic ? 'italic ' : '') + (bold ? '700 ' : '400 ') + size + 'px FiaPng, system-ui, Arial, sans-serif'; };
+        const spacing = v => { if ('letterSpacing' in g) g.letterSpacing = v + 'px'; };
+        const text = (s, x, y, color, align) => { g.fillStyle = color; g.textAlign = align || 'left'; g.fillText(s, x, y); };
+        const label = (s, x, y, color, align, size) => { font(size || 19, true); spacing(3); text(String(s).toUpperCase(), x, y, color || mute, align); spacing(0); };
+        const grad = (x0, y0, x1, y1, stops) => { const gr = g.createLinearGradient(x0, y0, x1, y1); stops.forEach((s, i) => gr.addColorStop(i / (stops.length - 1), s)); return gr; };
+        const accent = (x, w) => grad(x, 0, x + w, 0, [C.a, C.b]);
+        // shadowBlur nie podlega skalowaniu canvas, stąd mnożenie przez k
+        const glow = (color, blur) => { g.shadowColor = color; g.shadowBlur = blur * k; };
+        const noGlow = () => { g.shadowColor = 'transparent'; g.shadowBlur = 0; };
+        const path = p => { g.beginPath(); p.forEach((q, i) => i ? g.lineTo(q[0], q[1]) : g.moveTo(q[0], q[1])); g.closePath(); };
+        const cham = (x, y, w, h, c) => path([[x + c, y], [x + w, y], [x + w, y + h - c], [x + w - c, y + h], [x, y + h], [x, y + c]]);
+        const fill = style => { g.fillStyle = style; g.fill(); };
+        const stroke = (style, lw) => { g.strokeStyle = style; g.lineWidth = lw; g.stroke(); };
+        const rect = (x, y, w, h, style) => { g.fillStyle = style; g.fillRect(x, y, w, h); };
+        const circle = (x, y, rad) => { g.beginPath(); g.arc(x, y, rad, 0, Math.PI * 2); };
+        const panel = (x, y, w, h, hot) => {
+            cham(x, y, w, h, 24); fill(grad(x, y, x, y + h, ['rgba(34,38,55,0.94)', 'rgba(16,18,28,0.94)']));
+            stroke(grad(x, y, x + w, y + h, hot ? [C.a, C.b] : ['rgba(255,255,255,0.24)', 'rgba(255,255,255,0.05)', 'rgba(' + C.rgb + ',0.6)']), hot ? 3 : 1.5);
+        };
+        const hazard = (x, y, w, h) => {
+            g.save(); g.beginPath(); g.rect(x, y, w, h); g.clip();
+            rect(x, y, w, h, ink);
+            for (let i = -h; i < w + h; i += 30) { path([[x + i + h, y], [x + i + h + 16, y], [x + i + 16, y + h], [x + i, y + h]]); fill(accent(x, w)); }
+            g.restore();
+        };
+        function wrap(s, width) {
+            const out = [];
+            String(s).split(/\r?\n/).forEach(par => {
+                let line = '';
+                par.split(/\s+/).filter(Boolean).forEach(word => {
+                    const test = line ? line + ' ' + word : word;
+                    if (g.measureText(test).width <= width) { line = test; return; }
+                    if (line) { out.push(line); line = ''; }
+                    for (const ch of word) { if (line && g.measureText(line + ch).width > width) { out.push(line); line = ''; } line += ch; }
+                });
+                out.push(line);
+            });
+            return out;
+        }
+        function fit(s, size, min, width, maxLines, bold, italic) {
+            let fs = size, lines;
+            for (;;) {
+                font(fs, bold, italic); lines = wrap(s, width);
+                const whole = String(s).split(/\s+/).every(w => g.measureText(w).width <= width);
+                if ((whole && lines.length <= maxLines) || fs <= min) { const lh = Math.round(fs * 1.14); return { fs, lines, lh, h: lines.length * lh, bold, italic }; }
+                fs -= 2;
+            }
+        }
+        const put = (f, x, y, color, align) => { font(f.fs, f.bold, f.italic); f.lines.forEach((l, i) => text(l, x, y + f.fs * 0.88 + i * f.lh, color, align)); };
+        const monogram = (name, x, y, rad, hot) => {
+            circle(x, y, rad); fill(hot ? grad(x - rad, y - rad, x + rad, y + rad, [C.a, C.b]) : grad(x, y - rad, x, y + rad, ['#3a4058', '#20243a']));
+            stroke('rgba(255,255,255,0.35)', 1.5);
+            font(Math.round(rad * 1.05), true, true); text((Array.from(String(name).trim())[0] || '?').toUpperCase(), x - 1, y + rad * 0.37, white, 'center');
+        };
+
+        g.textBaseline = 'alphabetic';
+
+        /* --- tło: gradient, włókno węglowe, poświaty, linie prędkości --- */
+        rect(0, 0, W, H, grad(0, 0, 0, H, ['#0b0c14', '#10121d', '#06070b']));
+        const tile = document.createElement('canvas'); tile.width = tile.height = 12;
+        const t = tile.getContext('2d');
+        t.fillStyle = 'rgba(255,255,255,0.035)'; t.fillRect(0, 0, 6, 6); t.fillRect(6, 6, 6, 6);
+        t.fillStyle = 'rgba(0,0,0,0.30)'; t.fillRect(6, 0, 6, 6); t.fillRect(0, 6, 6, 6);
+        rect(0, 0, W, H, g.createPattern(tile, 'repeat'));
+        const orb = (x, y, rad, a) => { const gr = g.createRadialGradient(x, y, 0, x, y, rad); gr.addColorStop(0, 'rgba(' + C.rgb + ',' + a + ')'); gr.addColorStop(1, 'rgba(' + C.rgb + ',0)'); rect(x - rad, y - rad, 2 * rad, 2 * rad, gr); };
+        orb(W, 40, 760, 0.42); orb(0, 800, 620, 0.22); orb(W, H - 380, 640, 0.15);
+        for (let i = 0; i < 16; i++) {
+            const yy = 100 + i * 21, x0 = 430 + (i * 173) % 420;
+            path([[x0, yy], [W, yy - (W - x0) * 0.14], [W, yy - (W - x0) * 0.14 + (i % 3 ? 1.5 : 4)], [x0, yy + 1]]);
+            fill(grad(x0, 0, W, 0, ['rgba(255,255,255,0)', 'rgba(255,255,255,' + (i % 3 ? 0.10 : 0.06) + ')']));
+        }
+        rect(0, 0, 10, H, grad(0, 0, 0, H, [C.a, C.b, C.a, C.b]));
+        hazard(0, 0, W, 14);
+
+        /* --- światła startowe i marka --- */
+        for (let i = 0; i < 5; i++) {
+            const x = P + 15 + i * 42;
+            circle(x, 62, 17); fill('#05060a'); stroke('rgba(255,255,255,0.18)', 1.5);
+            glow(C.a, 22); circle(x, 62, 10); fill(C.a); noGlow();
+            circle(x - 3, 59, 3); fill('rgba(255,255,255,0.65)');
+        }
+        font(22, true); spacing(9); text('FIA SYSTEM', W - P + 9, 70, soft, 'right'); spacing(0);
+
+        /* --- wielki tytuł + numer sprawy --- */
+        const words = L('Werdykt stewardów', 'Stewards’ verdict').toUpperCase().split(' ');
+        const badgeW = 280, titleW = CW - badgeW - 44;
+        const t1 = fit(words[0], 136, 60, titleW, 1, true, true), t2 = fit(words.slice(1).join(' '), 94, 44, titleW, 1, true, true);
+        font(t1.fs, true, true); text(words[0], P + 7, 222 + 7, C.a);
+        text(words[0], P, 222, grad(0, 222 - t1.fs * 0.75, 0, 222, ['#ffffff', '#ffffff', '#aab3c8']));
+        font(t2.fs, true, true); glow('rgba(' + C.rgb + ',0.8)', 20); text(words.slice(1).join(' '), P, 318, accent(P, titleW)); noGlow();
+
+        const bx = W - P - badgeW, by = 122;
+        glow('rgba(' + C.rgb + ',0.7)', 34); cham(bx, by, badgeW, 188, 34); fill(grad(bx, by, bx + badgeW, by + 188, [C.a, C.b])); noGlow();
+        cham(bx + 8, by + 8, badgeW - 16, 172, 28); fill('rgba(8,9,15,0.90)');
+        label(L('Sprawa', 'Case'), bx + badgeW / 2, by + 52, mute, 'center');
+        const idf = fit(r.id, 62, 22, badgeW - 44, 2, true, true);
+        put(idf, bx + badgeW / 2, by + 68 + (96 - idf.h) / 2, white, 'center');
+
+        /* --- tor, split, sesja --- */
+        let y = 366;
+        const track = fit(r.track || '—', 44, 28, CW - 76, 2, true, true);
+        const trH = track.h + 36;
+        path([[P + 24, y], [W - P, y], [W - P - 24, y + trH], [P, y + trH]]); fill(grad(P, y, W - P, y, ['#ffffff', '#cfd5e4']));
+        put(track, W / 2, y + 18, ink, 'center');
+        y += trH + 16;
+        let cx = P;
+        [r.split, r.sessionType].filter(Boolean).forEach((s, i) => {
+            const f = fit(s, 24, 16, CW / 2 - 60, 2, true);
+            font(f.fs, true); const w = Math.max(...f.lines.map(l => g.measureText(l).width)) + 48, h = f.h + 22;
+            cham(cx, y, w, h, 14); fill(i ? 'rgba(255,255,255,0.08)' : accent(cx, w)); if (i) stroke('rgba(255,255,255,0.22)', 1.5);
+            put(f, cx + w / 2, y + 11, white, 'center');
+            cx += w + 14;
+        });
+        y += 108;
+
+        /* --- bohater: winny --- */
+        const heroTop = y;
+        const full = d.noOneGuilty ? L('Brak winnego', 'No one guilty') : String(d.guiltyNick || '—').trim();
+        const parts = full.split(/\s+/);
+        const big = !d.noOneGuilty && parts.length > 1 ? parts[parts.length - 1] : full;
+        const small = !d.noOneGuilty && parts.length > 1 ? parts.slice(0, -1).join(' ') : '';
+        const tag = L('Winny', 'Guilty').toUpperCase();
+        font(24, true, true); const tagW = g.measureText(tag).width + 70;
+        path([[P + 16, y], [P + tagW + 16, y], [P + tagW, y + 46], [P, y + 46]]); fill(accent(P, tagW));
+        text(tag, P + tagW / 2 + 8, y + 32, white, 'center');
+        y += 66;
+        if (small) { const f = fit(small, 56, 26, CW, 3, false, true); put(f, P + 4, y, soft); y += f.h + 2; }
+        const nf = fit(big, 164, 54, CW - 24, d.noOneGuilty ? 1 : 2, true, true);
+        font(nf.fs, true, true);
+        nf.lines.forEach((l, i) => {
+            const ly = y + nf.fs * 0.88 + i * nf.lh;
+            text(l, P + 9, ly + 8, C.a);
+            glow('rgba(0,0,0,0.65)', 18); text(l, P, ly, grad(0, ly - nf.fs * 0.75, 0, ly + 8, ['#ffffff', '#ffffff', '#b8c0d4'])); noGlow();
+        });
+        y += nf.h + 22;
+        rect(P, y, CW, 6, grad(P, 0, W - P, 0, [C.a, C.b, 'rgba(' + C.rgb + ',0)'])); y += 40;
+
+        /* --- kary --- */
+        const ptsStr = String(d.pointsPenalty || '0 pkt').trim(), m = ptsStr.match(/^([+-]?\d+(?:[.,]\d+)?)\s*(.*)$/);
+        const pw = 548, gap = 20, tw = CW - pw - gap;
+        const pFit = m ? null : fit(ptsStr, 86, 28, pw - 70, 5, true, true);
+        const timeStr = d.timePenalty || L('brak', 'none');
+        const tFit = fit(timeStr, 118, 30, tw - 56, 4, true, true);
+        const ph = Math.max(340, tFit.h + 190, pFit ? pFit.h + 130 : 0);
+        const pOn = pts > 0;
+        if (pOn) {
+            glow('rgba(' + C.rgb + ',0.85)', 46); cham(P, y, pw, ph, 40); fill(grad(P, y, P + pw, y + ph, [C.a, C.b])); noGlow();
+            g.save(); cham(P, y, pw, ph, 40); g.clip();
+            for (let i = 0; i < 6; i++) { const x = P + pw - 190 + i * 44; path([[x + 90, y], [x + 112, y], [x + 22, y + ph], [x, y + ph]]); fill('rgba(255,255,255,' + (0.05 + i * 0.018) + ')'); }
+            g.restore();
+        } else panel(P, y, pw, ph);
+        label(L('Punkty karne', 'Penalty points'), P + 36, y + 56, pOn ? white : mute, 'left', 22);
+        if (m) {
+            let ns = 260, us = 76, nw, uw;
+            for (;;) { font(ns, true, true); nw = g.measureText(m[1]).width; font(us, true, true); uw = m[2] ? g.measureText(m[2]).width : 0; if (nw + uw + 24 <= pw - 80 || ns <= 40) break; ns -= 4; us = Math.max(22, us - 1.2); }
+            const x = P + (pw - nw - uw - (uw ? 24 : 0)) / 2, base = y + ph / 2 + 36 + ns * 0.3;
+            font(ns, true, true); glow('rgba(0,0,0,0.45)', 24); text(m[1], x, base, pOn ? white : mute); noGlow();
+            if (m[2]) { font(us, true, true); text(m[2], x + nw + 24, base, pOn ? white : mute); }
+        } else put(pFit, P + pw / 2, y + 84 + (ph - 100 - pFit.h) / 2, pOn ? white : mute, 'center');
+
+        const tx = P + pw + gap, mid = tx + tw / 2;
+        panel(tx, y, tw, ph, hasTime);
+        label(L('Kara czasowa', 'Time penalty'), mid, y + 56, hasTime ? white : mute, 'center', 22);
+        // ikona stopera
+        const sy = y + 114, col = hasTime ? C.b : '#59607a';
+        circle(mid, sy, 28); stroke(col, 5);
+        g.beginPath(); g.moveTo(mid, sy - 28); g.lineTo(mid, sy - 40); g.moveTo(mid - 11, sy - 41); g.lineTo(mid + 11, sy - 41); g.moveTo(mid, sy); g.lineTo(mid + 14, sy - 14); stroke(col, 5);
+        put(tFit, mid, y + 160 + (ph - 180 - tFit.h) / 2, hasTime ? white : mute, 'center');
+        y += ph + 46;
+
+        /* --- decyzja --- */
+        const df = fit(d.decision || '—', 48, 28, CW - 80, 4, true, true);
+        const dh = df.h + 104;
+        rect(P, y, CW, dh, 'rgba(5,6,10,0.88)'); hazard(P, y, CW, 14); hazard(P, y + dh - 14, CW, 14);
+        label(L('Decyzja', 'Decision'), W / 2, y + 52, C.b, 'center');
+        put(df, W / 2, y + 68, white, 'center');
+        y += dh + 22;
+
+        extras(d).forEach((x, i) => {
+            const f = fit(x.decision + ' — ' + (x.timePenalty || L('brak', 'none')) + ', ' + (x.pointsPenalty || '0 pkt'), 30, 22, CW - 80, 6, true);
+            const h = f.h + 82;
+            panel(P, y, CW, h); rect(P + 18, y + 28, 6, h - 56, C.a);
+            label(L('Dodatkowa decyzja ', 'Extra decision ') + (i + 1), P + 44, y + 40);
+            put(f, P + 44, y + 54, white);
+            y += h + 16;
+        });
+        y += 6;
+
+        /* --- strony i kategoria --- */
+        const half = (CW - 20) / 2;
+        const who = [[L('Oskarżony', 'Accused'), r.accusedNick || '—', true], [L('Zgłaszający', 'Reporter'), r.nick || '—', false]]
+            .map(a => ({ title: a[0], name: a[1], hot: a[2], f: fit(a[1], 32, 20, half - 138, 4, true) }));
+        const wh = Math.max(128, ...who.map(a => a.f.h + 82));
+        who.forEach((a, i) => {
+            const x = P + i * (half + 20);
+            panel(x, y, half, wh);
+            monogram(a.name, x + 62, y + wh / 2, 36, a.hot && penalised);
+            const top = y + (wh - a.f.h - 36) / 2;
+            label(a.title, x + 118, top + 20, mute, 'left', 17);
+            put(a.f, x + 118, top + 34, white);
+        });
+        y += wh + 20;
+        const cat = fit(r.category || '—', 31, 24, CW - 72, 8, true);
+        const ch = cat.h + 90;
+        panel(P, y, CW, ch);
+        label(L('Kategoria', 'Category'), P + 36, y + 42, C.b);
+        put(cat, P + 36, y + 58, white);
+        y += ch + 20;
+
+        /* --- uzasadnienie --- */
+        font(28, false);
+        const paras = String(d.verdictDetails || L('(brak uzasadnienia)', '(no reasoning)')).split(/\r?\n/).map(s => s.trim()).filter(Boolean).map(s => wrap(s, CW - 116));
+        const rh = 110 + paras.reduce((a, p) => a + p.length * 41 + 18, 0);
+        panel(P, y, CW, rh);
+        font(230, true, true); text('”', W - P - 36, y + 190, 'rgba(255,255,255,0.07)', 'right');
+        const head = L('Uzasadnienie', 'Reasoning').toUpperCase();
+        font(23, true, true); const hw = g.measureText(head).width + 60;
+        path([[P + 36, y + 26], [P + 36 + hw, y + 26], [P + 22 + hw, y + 70], [P + 22, y + 70]]); fill(accent(P, hw));
+        text(head, P + 29 + hw / 2, y + 57, white, 'center');
+        let ly = y + 122;
+        paras.forEach(p => {
+            path([[P + 44, ly - 18], [P + 53, ly - 9], [P + 44, ly], [P + 35, ly - 9]]); fill(C.b);
+            font(28, false); p.forEach(l => { text(l, P + 76, ly, soft); ly += 41; });
+            ly += 18;
+        });
+        y += rh + 20;
+
+        /* --- oś czasu --- */
+        panel(P, y, CW, 158);
+        const x1 = P + 48, x2 = W - P - 48;
+        glow(C.a, 16); rect(x1, y + 46, x2 - x1, 5, accent(x1, x2 - x1)); noGlow();
+        [x1, x2].forEach((x, i) => { circle(x, y + 48.5, 15); fill(ink); stroke(i ? C.b : C.a, 5); circle(x, y + 48.5, 5); fill(white); });
+        [[L('Data zgłoszenia', 'Reported'), F.fmtDate(F.ts(r)), P + 32, 'left'], [L('Data werdyktu', 'Issued'), F.fmtDate(d.issuedAt), W - P - 32, 'right']].forEach(a => {
+            label(a[0], a[2], y + 98, mute, a[3], 17);
+            font(31, true, true); text(a[1], a[2], y + 135, white, a[3]);
+        });
+        y += 178;
+
+        /* --- sędzia i zatwierdzający jako plakietki --- */
+        function people(title, names, hot) {
+            if (!names.length) return;
+            const items = []; let px = 0, row = 0;
+            names.forEach(n => {
+                const f = fit(n, 28, 18, CW - 200, 3, true);
+                font(f.fs, true); const w = Math.max(...f.lines.map(l => g.measureText(l).width)) + 112;
+                if (px && px + w > CW - 64) { px = 0; row++; }
+                items.push({ n, f, w, px, row }); px += w + 14;
+            });
+            const rowsH = [];
+            items.forEach(it => { rowsH[it.row] = Math.max(rowsH[it.row] || 66, it.f.h + 26); });
+            const h = 70 + rowsH.reduce((a, b) => a + b + 12, 0) + 10;
+            panel(P, y, CW, h);
+            label(title, P + 36, y + 44, mute);
+            items.forEach(it => {
+                const iy = y + 64 + rowsH.slice(0, it.row).reduce((a, b) => a + b + 12, 0), ix = P + 32 + it.px, ih = rowsH[it.row];
+                cham(ix, iy, it.w, ih, 18); fill('rgba(255,255,255,0.07)'); stroke('rgba(255,255,255,0.16)', 1.5);
+                monogram(it.n, ix + 42, iy + ih / 2, 25, hot);
+                put(it.f, ix + 82, iy + (ih - it.f.h) / 2, white);
+            });
+            y += h + 20;
+        }
+        people(L('Sędzia', 'Judge'), [d.judge || '—'], true);
+        people(L('Zatwierdzili', 'Approved by'), approved(d) ? (Array.isArray(d.approvedBy) ? d.approvedBy : Object.values(d.approvedBy)).map(a => a && a.nick).filter(Boolean) : [], false);
+
+        /* --- stopka: falująca flaga w szachownicę --- */
+        y += 22;
+        font(19, false); spacing(1);
+        text('FIA System · ' + L('wygenerowano', 'generated') + ' ' + new Date().toLocaleString(F.lang() === 'en' ? 'en-GB' : 'pl-PL'), W / 2, y, mute, 'center'); spacing(0);
+        y += 30;
+        const s = 20;
+        for (let i = 0; i < Math.ceil(W / s); i++) {
+            const dy = Math.sin(i / 5) * 11 + 12;
+            for (let j = 0; j < 3; j++) rect(i * s, y + dy + j * s, s + 0.6, s + 0.6, (i + j) % 2 ? '#05060a' : '#f4f6fb');
+            rect(i * s, y + dy, s + 0.6, 3 * s, 'rgba(0,0,0,' + (0.18 + 0.18 * Math.cos(i / 5)) + ')');
+        }
+        y += 3 * s + 40;
+        hazard(0, y - 14, W, 14);
+        return y;
+    }
+
+    async function verdictPng(id) {
+        const r = F.incidents().find(x => String(x.id) === String(id));
+        if (!r || !r.decisionData) { F.toast(L('Brak werdyktu', 'No verdict'), id); return null; }
+        await pngFonts();
+        const W = 1080, cv = document.createElement('canvas');
+        cv.width = cv.height = 1;
+        const H = Math.ceil(paintVerdict(cv.getContext('2d'), r, r.decisionData, W, 1, 1)); // 1. przebieg: pomiar wysokości
+        // zwykle 2× (2160 px szerokości); przy bardzo długich werdyktach mniej, by zmieścić się w limitach canvas (także na telefonach)
+        const k = Math.min(2, Math.sqrt(16e6 / (W * H)), 16000 / H);
+        cv.width = Math.floor(W * k); cv.height = Math.floor(H * k);
+        const g = cv.getContext('2d'); g.scale(k, k);
+        paintVerdict(g, r, r.decisionData, W, H, k);
+        const blob = await new Promise((res, rej) => cv.toBlob(b => b ? res(b) : rej(new Error('PNG')), 'image/png'));
+        const file = { name: 'fia-werdykt-' + F.slug(id) + '.png', blob };
+        cv.width = cv.height = 0;
+        F.download(file.blob, file.name);
+        return [file];
     }
 
     F.registerTab({
@@ -38472,9 +38934,9 @@ function findAlignmentPattern(matrix, alignmentPatternQuads, topRight, topLeft, 
                 '<div class="fiax-card"><h3>' + esc(L('Kopia danych', 'Data copy')) + '</h3><p class="fiax-muted">' + esc(L('Pełny zrzut JSON (zgłoszenia + apelacje). Wersja .gz jest kilkanaście razy mniejsza.', 'Full JSON dump (reports + appeals). The .gz version is many times smaller.')) + '</p><div class="fiax-row tight"><button type="button" class="fiax-btn" data-x="json">JSON</button><button type="button" class="fiax-btn ghost" data-x="gz">JSON.GZ</button></div></div>' +
                 '<div class="fiax-card"><h3>' + esc(L('Raport PDF', 'PDF report')) + '</h3><p class="fiax-muted">' + esc(L('Raport z podsumowaniem statusów, torów, rankingiem kar i tabelą werdyktów.', 'Report with status summary, tracks, penalty ranking and verdict table.')) + '</p><div class="fiax-row tight"><button type="button" class="fiax-btn" data-x="pdf">PDF</button></div></div>' +
                 '</div>' +
-                '<div class="fiax-card"><h3>' + esc(L('Werdykt jako dokument PDF', 'Verdict as a PDF document')) + '</h3>' +
-                '<div class="fiax-row"><div class="fld" style="flex:1;min-width:260px"><label>' + esc(L('Sprawa z wydanym werdyktem', 'Case with an issued verdict')) + '</label><select data-vsel></select></div><button type="button" class="fiax-btn gold" data-x="vpdf">' + esc(L('Pobierz PDF werdyktu', 'Download verdict PDF')) + '</button></div>' +
-                '<p class="fiax-muted">' + esc(L('Dokument zawiera dane werdyktu, uzasadnienie, kod QR i skrót SHA-256 danych — pozwala sprawdzić, czy PDF nie został zmieniony względem zapisu w systemie.', 'The document contains the verdict data, reasoning, a QR code and a SHA-256 digest — so a copy can be checked against the system record.')) + '</p></div>' +
+                '<div class="fiax-card"><h3>' + esc(L('Werdykt jako dokument PDF lub obraz PNG', 'Verdict as a PDF document or PNG image')) + '</h3>' +
+                '<div class="fiax-row"><div class="fld" style="flex:1;min-width:260px"><label>' + esc(L('Sprawa z wydanym werdyktem', 'Case with an issued verdict')) + '</label><select data-vsel></select></div><button type="button" class="fiax-btn gold" data-x="vpdf">' + esc(L('Pobierz PDF werdyktu', 'Download verdict PDF')) + '</button><button type="button" class="fiax-btn gold" data-x="vpng">' + esc(L('Pobierz PNG werdyktu', 'Download verdict PNG')) + '</button></div>' +
+                '<p class="fiax-muted">' + esc(L('PDF zawiera dane werdyktu, uzasadnienie, kod QR i skrót SHA-256 danych — pozwala porównać kopię z zapisem w systemie. PNG to grafika do udostępniania, bez kodu QR (weryfikator jej nie sprawdzi).', 'The PDF contains the verdict data, reasoning, a QR code and a SHA-256 digest — so a copy can be checked against the system record. The PNG is a shareable graphic without a QR code (the verifier cannot check it).')) + '</p></div>' +
                 '<div class="fiax-note" data-status></div>';
             root.addEventListener('click', async e => {
                 const b = e.target.closest('[data-x]'); if (!b) return;
@@ -38487,6 +38949,7 @@ function findAlignmentPattern(matrix, alignmentPatternQuads, topRight, topLeft, 
                     else if (k === 'gz') { await toJson(root, true); st.textContent = 'JSON.GZ OK'; }
                     else if (k === 'pdf') { await toPdfReport(root); st.textContent = 'PDF OK'; }
                     else if (k === 'vpdf') { const id = root.querySelector('[data-vsel]').value; if (id) { await verdictPdf(id); st.textContent = 'PDF ' + id + ' OK'; } else st.textContent = L('Wybierz sprawę.', 'Pick a case.'); }
+                    else if (k === 'vpng') { const id = root.querySelector('[data-vsel]').value; if (id) { const f = await verdictPng(id); st.textContent = f ? 'PNG ' + id + ' OK' + (f.length > 1 ? ' (' + L('plików: ', 'files: ') + f.length + ')' : '') : L('Brak werdyktu', 'No verdict'); } else st.textContent = L('Wybierz sprawę.', 'Pick a case.'); }
                 } catch (err) { console.error(err); st.textContent = L('Błąd: ', 'Error: ') + err.message; }
                 b.disabled = false;
             });
@@ -38500,6 +38963,7 @@ function findAlignmentPattern(matrix, alignmentPatternQuads, topRight, topLeft, 
         verdictPdf
     });
     F.verdictPdf = verdictPdf;
+    F.verdictPng = verdictPng;
     F._pdf = { pdfDoc, header, footer, needsUnicode };
 })();
 
